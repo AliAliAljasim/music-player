@@ -9,7 +9,7 @@
   "scripts": {
     "start": "./build-config.sh && electron .",
     "dist:win": "./build-config.sh && electron-builder --win --x64",
-    "release:win": "./build-config.sh && GH_TOKEN=$(gh auth token) electron-builder --win --x64 --publish always"
+    "release:win": "bash scripts/release.sh"
   },
   "build": {
     "appId": "com.alialialjasim.bside",
