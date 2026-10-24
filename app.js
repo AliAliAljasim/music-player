@@ -55,7 +55,7 @@
 
   // Playback preferences, remembered between visits. fade and crossfade are seconds (0 = off).
   const PREFS_KEY = 'bside.prefs';
-  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false, sortKey: '', sortDir: 1, rpm: 33 };
+  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false, sortKey: '', sortDir: 1 };
 
   function loadPrefs() {
     try {
@@ -70,7 +70,7 @@
     view: 'player', openId: 1, plId: 1, idx: 2, pos: 0,
     playing: false, pick: null, rpm: 33, zoom: 1,
     account: null, syncing: false, ytError: '', notice: '', panel: null, volumeHint: false,
-    qTrack: null, menu: null, sleep: null, listFilter: '', armLift: false,
+    qTrack: null, menu: null, sleep: null, listFilter: '',
     search: { q: '', ytQ: '', yt: null, loading: false, error: '' },
     ...PREFS, ...loadPrefs()
   };
@@ -649,8 +649,8 @@
       headerLine: s.view === 'player' ? 'rgba(255,255,255,.12)' : '#262320',
       playing: s.playing,
       spinState: s.playing ? 'running' : 'paused',
-      armAngle: s.armLift ? 14 : (s.playing || s.pos > 0) ? (27.8 + 20.9 * Math.min(1, s.pos / cur[2])).toFixed(2) : -3,
-      armShadow: s.playing && !s.armLift ? 'drop-shadow(3px 5px 2.5px rgba(0,0,0,.45))' : 'drop-shadow(10px 18px 7px rgba(0,0,0,.3))',
+      armAngle: (s.playing || s.pos > 0) ? (27.8 + 20.9 * Math.min(1, s.pos / cur[2])).toFixed(2) : -3,
+      armShadow: s.playing ? 'drop-shadow(3px 5px 2.5px rgba(0,0,0,.45))' : 'drop-shadow(10px 18px 7px rgba(0,0,0,.3))',
       stageZoom: s.zoom,
       spinDur: s.rpm === 45 ? '4.4s' : '6s',
       rpmLabel: s.rpm === 45 ? '45' : '33⅓',
@@ -758,7 +758,7 @@
     playerTitle: el('player-title'), playerArtist: el('player-artist'),
 
     disc: el('disc'), discLabel: el('disc-label'), discTitle: el('disc-title'), discArtist: el('disc-artist'), discRpm: el('disc-rpm'),
-    tonearm: el('tonearm'), rpmSwitch: el('rpm-switch'), stylusStripe: el('stylus-stripe'),
+    tonearm: el('tonearm'), stylusStripe: el('stylus-stripe'),
 
     posLabel: el('pos-label'), timeLabel: el('time-label'), seekTrack: el('seek-track'),
     seekFill: el('seek-fill'), seekKnob: el('seek-knob'),
@@ -860,23 +860,7 @@
 
   // ---------- render ----------
 
-  // When the song changes while playing, lift the tonearm for a moment.
-  const ARM_LIFT_MS = 650;
-  let armSong = '';
-  let armTimer = 0;
-  function liftArmOnSongChange() {
-    const t = nowTrack();
-    const key = (state.qTrack ? 'q' : state.plId + ':' + state.idx) + ':' + (t[3] || t[0]);
-    if (armSong && key !== armSong && state.playing) {
-      state.armLift = true;
-      clearTimeout(armTimer);
-      armTimer = setTimeout(() => setState({ armLift: false }), ARM_LIFT_MS);
-    }
-    armSong = key;
-  }
-
   function render() {
-    liftArmOnSongChange();
     const v = computeVals();
 
     document.body.style.setProperty('--accent', v.accent);
@@ -1522,13 +1506,7 @@
     refs.discArtist.textContent = v.now.artist;
     refs.discRpm.textContent = v.rpmLabel + ' RPM';
 
-    refs.tonearm.classList.toggle('lifted', state.armLift);
     refs.tonearm.style.transform = 'rotate(' + v.armAngle + 'deg)';
-    refs.rpmSwitch.querySelectorAll('button').forEach((b) => {
-      const on = +b.dataset.rpm === state.rpm;
-      b.classList.toggle('on', on);
-      b.setAttribute('aria-pressed', String(on));
-    });
     refs.tonearm.style.filter = v.armShadow;
     refs.stylusStripe.style.background = v.accent;
 
@@ -1618,7 +1596,6 @@
     }
   });
   refs.playerDismiss.addEventListener('click', actions.goHome);
-  refs.rpmSwitch.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setPrefs({ rpm: +b.dataset.rpm })));
   refs.playerLyrics.addEventListener('click', () => setPrefs({ lyrics: !state.lyrics }));
 
   // The song menu closes on any click outside it, Escape, scrolling or resizing.

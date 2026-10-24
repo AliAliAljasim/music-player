@@ -82,11 +82,6 @@ button {
 @keyframes splash-word { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .splash.done { transform: translateY(-100%); }
 .splash.done .splash-mark { transform: translateY(-48px); opacity: 0; transition: transform .8s cubic-bezier(.76,0,.24,1), opacity .5s ease; }
-@media (prefers-reduced-motion: reduce) {
-  .splash { transition: opacity .35s ease; }
-  .splash.done { transform: none; opacity: 0; }
-  .splash-disc, .splash-mark, .splash-word { animation: none; }
-}
 /* The compact strip opens straight away. */
 @media (max-height: 200px) { .splash { display: none; } }
 
@@ -573,25 +568,6 @@ button {
   position: absolute; left: 590px; top: 106px; width: 0; height: 0; transform-origin: 0 0;
   transition: transform 1.4s cubic-bezier(.45,0,.2,1), filter .6s ease;
 }
-/* Skipping lifts the arm off the record and swings it out a little; it then
-   settles back onto the new song's first groove. */
-.tonearm.lifted { transition: transform .45s cubic-bezier(.3,0,.2,1), filter .3s ease; }
-
-/* Speed switch on the deck, like the buttons on a real turntable. */
-.rpm-switch {
-  position: absolute; left: 536px; top: 420px; display: flex; gap: 6px; padding: 5px;
-  border-radius: 8px; background: linear-gradient(180deg, #2A2724, #1A1816);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 6px 14px rgba(0,0,0,.35);
-}
-.rpm-switch button {
-  display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 5px;
-  font-family: 'DM Mono', monospace; font-size: 11px; color: rgba(255,255,255,.55);
-  background: linear-gradient(180deg, #3A3631, #2A2724); box-shadow: 0 1px 0 rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08);
-}
-.rpm-switch button:hover { color: #FFFFFF; }
-.rpm-switch button.on { color: #FFFFFF; background: linear-gradient(180deg, #2A2724, #34302B); box-shadow: inset 0 1px 3px rgba(0,0,0,.6); }
-.rpm-led { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.18); transition: background .2s, box-shadow .2s; }
-.rpm-switch button.on .rpm-led { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .arm-wire { position: absolute; left: -4px; top: -36px; width: 8px; height: 36px; background: linear-gradient(90deg, #6E6962, #E9E4DC 45%, #A8A197 62%, #5E5953); }
 .arm-mid {
   position: absolute; left: -18px; top: -82px; width: 36px; height: 48px; border-radius: 6px;
