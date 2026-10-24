@@ -91,7 +91,24 @@
     } catch (e) { /* storage unavailable: settings last this session */ }
   }
 
-  function applyVolume() { yt.setVolume(state.muted ? 0 : state.volume); }
+  // Volume follows a decibel curve, the way loudness is heard: 1% is about
+  // -50 dB (a whisper), 50% is -25 dB, 100% is full, and 0 is silent. In the
+  // desktop app the curve is applied precisely inside the YouTube player
+  // (see main.js); in a plain browser the player's whole-number volume is
+  // the closest it can get.
+  const VOLUME_FLOOR_DB = -50;
+  const volumeGain = (v) => (v <= 0 ? 0 : Math.pow(10, (VOLUME_FLOOR_DB * (1 - v / 100)) / 20));
+
+  function applyVolume() {
+    const v = state.muted ? 0 : state.volume;
+    const g = volumeGain(v);
+    if (shell && shell.setOutputGain) {
+      yt.setVolume(v > 0 ? 100 : 0);
+      shell.setOutputGain(g);
+    } else {
+      yt.setVolume(v > 0 ? Math.max(1, Math.round(100 * g)) : 0);
+    }
+  }
 
   let noticeTimer = 0;
   function notify(text) {
@@ -781,11 +798,14 @@
 
     compact: el('compact'), compactArt: el('compact-art'), compactTitle: el('compact-title'), compactArtist: el('compact-artist'),
     compactPrev: el('compact-prev'), compactToggle: el('compact-toggle'), compactNext: el('compact-next'),
-    compactExpand: el('compact-expand'), compactPin: el('compact-pin'),
+    compactExpand: el('compact-expand'),
     spDesktop: el('sp-desktop'), spLogin: el('sp-login'), spLoginModeRow: el('sp-login-mode-row'), spLoginMode: el('sp-login-mode'),
-    spTrayClose: el('sp-tray-close'), spKeys: el('sp-keys'), spKeysHelp: el('sp-keys-help'), compactClose: el('compact-close'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
+    spTrayClose: el('sp-tray-close'), spKeys: el('sp-keys'), spKeysHelp: el('sp-keys-help'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
 
     splash: el('splash'), scroller: el('scroller'),
+    viewSettings: el('view-settings'), settingsBack: el('settings-back'), settingsNav: el('settings-nav'), spMore: el('sp-more'),
+    setOpacityCompact: el('set-opacity-compact'), setOpacityCompactVal: el('set-opacity-compact-val'),
+    setOpacityFull: el('set-opacity-full'), setOpacityFullVal: el('set-opacity-full-val'),
     searchInput: el('search-input'), viewSearch: el('view-search'),
     searchLibrary: el('search-library'), searchLibraryRows: el('search-library-rows'),
     searchYtHint: el('search-yt-hint'), searchYtRows: el('search-yt-rows'),
@@ -890,6 +910,7 @@
     refs.viewCrate.classList.toggle('active', v.isCrate);
     refs.viewPlayer.classList.toggle('active', v.isPlayer);
     refs.viewSearch.classList.toggle('active', state.view === 'search');
+    refs.viewSettings.classList.toggle('active', state.view === 'settings');
 
     renderHome(v);
     renderList(v);
@@ -911,6 +932,8 @@
 
   function renderSettings(v) {
     refs.settingsPanel.classList.toggle('hidden', state.panel !== 'settings');
+    // Settings page: hide categories whose section isn't available here.
+    refs.settingsNav.querySelectorAll('button').forEach((b) => b.classList.toggle('hidden', el(b.dataset.sec).classList.contains('hidden')));
     refs.btnSettings.classList.toggle('on', state.panel === 'settings');
     refs.btnSettings.setAttribute('aria-expanded', String(state.panel === 'settings'));
 
@@ -1565,6 +1588,18 @@
   refs.spFade.addEventListener('input', () => actions.setFade(Number(refs.spFade.value)));
   refs.spXf.addEventListener('input', () => actions.setCrossfade(Number(refs.spXf.value)));
   refs.spPressing.addEventListener('click', actions.openCrateFromSettings);
+
+  // The full settings page: opened from the quick panel, back to where you were.
+  let viewBeforeSettings = 'home';
+  refs.spMore.addEventListener('click', () => {
+    if (state.view !== 'settings') viewBeforeSettings = state.view;
+    setState({ view: 'settings', panel: null });
+  });
+  refs.settingsBack.addEventListener('click', () => setState({ view: viewBeforeSettings }));
+  refs.settingsNav.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+    refs.settingsNav.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+    el(b.dataset.sec).scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
   refs.spSleep.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setSleep(b.dataset.v)));
 
   refs.btnQueue.addEventListener('click', () => actions.togglePanel('queue'));
@@ -1617,8 +1652,12 @@
   // Compact strip (the window is resized to it by the Electron shell).
   refs.btnCompact.classList.toggle('hidden', !shell);
   refs.compactExpand.classList.toggle('hidden', !shell);
-  refs.compactClose.classList.toggle('hidden', !shell);
-  refs.compactClose.addEventListener('click', () => shell.close());
+  // Right-click the strip for volume, keep on top, opacity, full player, close.
+  refs.compact.addEventListener('contextmenu', (e) => {
+    if (!shell || !shell.showStripMenu) return;
+    e.preventDefault();
+    shell.showStripMenu({ volume: state.volume, muted: state.muted });
+  });
   refs.btnCompact.addEventListener('click', () => actions.setCompact(true));
   refs.compactExpand.addEventListener('click', () => actions.setCompact(false));
   refs.compactArt.addEventListener('click', () => actions.setCompact(false));
@@ -1784,13 +1823,18 @@
 
   function renderDesktop() {
     refs.spDesktop.classList.toggle('hidden', !desk);
-    refs.compactPin.classList.toggle('hidden', !desk);
+    document.querySelectorAll('.desktop-only').forEach((n) => n.classList.toggle('hidden', !desk));
     if (!desk) return;
     setSwitch(refs.spLogin, !!desk.openAtLogin);
     refs.spLogin.closest('.sp-line').classList.toggle('disabled', !desk.canStartup);
     refs.spLoginModeRow.classList.toggle('disabled', !desk.openAtLogin);
     refs.spLoginMode.querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === 'tray') === !!desk.startInTray));
     setSwitch(refs.spTrayClose, !!desk.closeToTray);
+    for (const [input, label, value] of [[refs.setOpacityCompact, refs.setOpacityCompactVal, desk.opacityCompact], [refs.setOpacityFull, refs.setOpacityFullVal, desk.opacityFull]]) {
+      const pct = Math.round((value || 1) * 100);
+      input.value = String(pct);
+      label.textContent = pct + '%';
+    }
     setSwitch(refs.spKeys, !!desk.shortcuts);
     refs.spKeysHelp.textContent = '';
     if (desk.shortcuts) {
@@ -1802,26 +1846,27 @@
         refs.spKeysHelp.append(w);
       }
     }
-    refs.compactPin.classList.toggle('on', !!desk.pinned);
-    refs.compactPin.setAttribute('aria-pressed', String(!!desk.pinned));
-    refs.compactPin.title = desk.pinned ? 'Keep on top: on' : 'Keep on top';
-    refs.compactPin.setAttribute('aria-label', refs.compactPin.title);
   }
 
   function changeDesktop(patch) {
     shell.settings(patch).then((s) => { desk = s; renderDesktop(); });
   }
 
+  renderDesktop(); // hides the desktop-only settings until (unless) the shell answers
   if (shell && shell.settings) {
     shell.settings().then((s) => { desk = s; renderDesktop(); });
     refs.spLogin.addEventListener('click', () => changeDesktop({ openAtLogin: !desk.openAtLogin }));
     refs.spLoginMode.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => changeDesktop({ startInTray: b.dataset.v === 'tray' })));
     refs.spTrayClose.addEventListener('click', () => changeDesktop({ closeToTray: !desk.closeToTray }));
     refs.spKeys.addEventListener('click', () => changeDesktop({ shortcuts: !desk.shortcuts }));
-    refs.compactPin.addEventListener('click', () => changeDesktop({ pinned: !desk.pinned }));
+    refs.setOpacityCompact.addEventListener('input', () => changeDesktop({ opacityCompact: Number(refs.setOpacityCompact.value) / 100 }));
+    refs.setOpacityFull.addEventListener('input', () => changeDesktop({ opacityFull: Number(refs.setOpacityFull.value) / 100 }));
+    if (shell.onSettingsChanged) shell.onSettingsChanged((s) => { desk = s; renderDesktop(); });
     // Global shortcuts and the tray menu.
     shell.onCommand((cmd) => {
-      if (cmd === 'toggle') actions.toggle();
+      if (cmd && cmd.type === 'volume') actions.setVolume(cmd.value);
+      else if (cmd && cmd.type === 'mute') actions.toggleMute();
+      else if (cmd === 'toggle') actions.toggle();
       else if (cmd === 'next') actions.next();
       else if (cmd === 'prev') actions.prev();
       else if (cmd === 'volup' || cmd === 'voldown') {

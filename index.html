@@ -83,6 +83,94 @@
     </section>
   </main>
 
+  <!-- SETTINGS PAGE -->
+  <main class="view view-settings" id="view-settings">
+    <button class="back-link" id="settings-back">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"></path></svg>
+      Back
+    </button>
+    <h1 class="settings-title">Settings</h1>
+    <div class="settings-layout">
+      <nav class="settings-nav" id="settings-nav" aria-label="Settings categories">
+        <button data-sec="set-sound">Sound</button>
+        <button data-sec="set-appearance">Appearance</button>
+        <button data-sec="sp-desktop" class="needs-desktop">Desktop</button>
+        <button data-sec="set-account">YouTube Music</button>
+        <button data-sec="sp-app" class="needs-updates">About &amp; updates</button>
+      </nav>
+      <div class="settings-body">
+        <section class="settings-card" id="set-sound">
+          <h2>Sound</h2>
+            <label class="sp-field">
+              <span class="sp-label"><span>Fade in / out</span><span class="mono" id="sp-fade-val"></span></span>
+              <input type="range" id="sp-fade" min="0" max="5" step="0.5">
+            </label>
+            <label class="sp-field">
+              <span class="sp-label"><span>Crossfade</span><span class="mono" id="sp-xf-val"></span></span>
+              <input type="range" id="sp-xf" min="0" max="12" step="1">
+            </label>
+          <p class="sp-help">Fades play when a song starts or you skip. Crossfade blends the end of each song into the next.</p>
+        </section>
+        <section class="settings-card" id="set-appearance">
+          <h2>Appearance</h2>
+          <label class="sp-field desktop-only">
+            <span class="sp-label"><span>Mini player opacity</span><span class="mono" id="set-opacity-compact-val"></span></span>
+            <input type="range" id="set-opacity-compact" min="30" max="100" step="5">
+          </label>
+          <label class="sp-field desktop-only">
+            <span class="sp-label"><span>Window opacity</span><span class="mono" id="set-opacity-full-val"></span></span>
+            <input type="range" id="set-opacity-full" min="30" max="100" step="5">
+          </label>
+          <div class="sp-field">
+            <span class="sp-label"><span>Record pressing</span></span>
+          <button class="sp-link" id="sp-pressing">
+            <span class="pressing-dot" id="sp-pressing-dot"></span>
+            <span class="sp-link-text" id="sp-pressing-name"></span>
+            <span class="sp-link-go">Change</span>
+          </button>
+          </div>
+        </section>
+        <section class="settings-card hidden" id="sp-desktop">
+          <h2>Desktop</h2>
+          <div class="sp-line">
+            <span>Open at sign-in</span>
+            <button class="switch" id="sp-login" role="switch" aria-checked="false" aria-label="Open at sign-in"><span></span></button>
+          </div>
+          <div class="sp-line" id="sp-login-mode-row">
+            <span>Opens as</span>
+            <div class="segmented" id="sp-login-mode" role="group" aria-label="Opens as">
+              <button data-v="window">Window</button><button data-v="tray">Tray only</button>
+            </div>
+          </div>
+          <div class="sp-line">
+            <span>Closing keeps playing in the tray</span>
+            <button class="switch" id="sp-tray-close" role="switch" aria-checked="false" aria-label="Closing keeps playing in the tray"><span></span></button>
+          </div>
+          <div class="sp-line">
+            <span>Keyboard shortcuts</span>
+            <button class="switch" id="sp-keys" role="switch" aria-checked="false" aria-label="Keyboard shortcuts"><span></span></button>
+          </div>
+          <p class="sp-help" id="sp-keys-help"></p>
+        </section>
+        <section class="settings-card" id="set-account">
+          <h2>YouTube Music</h2>
+          <div id="sp-account"></div>
+        </section>
+        <section class="settings-card hidden" id="sp-app">
+          <h2>About &amp; updates</h2>
+          <div class="sp-line">
+            <span class="sp-update-text">
+              <span id="sp-update-title"></span>
+              <span class="sp-update-sub" id="sp-update-sub"></span>
+            </span>
+            <button class="pill pill-ghost" id="sp-update-btn"></button>
+          </div>
+          <div class="sp-progress hidden" id="sp-progress"><div id="sp-progress-fill"></div></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
   <!-- PLAYLIST -->
   <main class="view view-list" id="view-list">
     <button class="back-link" id="list-back">
@@ -299,66 +387,16 @@
       </div>
     </section>
     <section class="sp-section">
-      <span class="eyebrow">Sound</span>
+      <span class="eyebrow">Volume</span>
       <div class="sp-row">
         <button class="ctrl-btn sp-mute" id="sp-mute" aria-label="Mute"></button>
         <input type="range" id="sp-volume" min="0" max="100" step="1" aria-label="Volume">
         <span class="mono sp-val" id="sp-volume-val"></span>
       </div>
-      <label class="sp-field">
-        <span class="sp-label"><span>Fade in / out</span><span class="mono" id="sp-fade-val"></span></span>
-        <input type="range" id="sp-fade" min="0" max="5" step="0.5">
-      </label>
-      <label class="sp-field">
-        <span class="sp-label"><span>Crossfade</span><span class="mono" id="sp-xf-val"></span></span>
-        <input type="range" id="sp-xf" min="0" max="12" step="1">
-      </label>
     </section>
-    <section class="sp-section">
-      <span class="eyebrow">Record</span>
-      <button class="sp-link" id="sp-pressing">
-        <span class="pressing-dot" id="sp-pressing-dot"></span>
-        <span class="sp-link-text" id="sp-pressing-name"></span>
-        <span class="sp-link-go">Change</span>
-      </button>
-    </section>
-    <section class="sp-section">
-      <span class="eyebrow">YouTube Music</span>
-      <div id="sp-account"></div>
-    </section>
-    <section class="sp-section hidden" id="sp-desktop">
-      <span class="eyebrow">Desktop</span>
-      <div class="sp-line">
-        <span>Open at sign-in</span>
-        <button class="switch" id="sp-login" role="switch" aria-checked="false" aria-label="Open at sign-in"><span></span></button>
-      </div>
-      <div class="sp-line" id="sp-login-mode-row">
-        <span>Opens as</span>
-        <div class="segmented" id="sp-login-mode" role="group" aria-label="Opens as">
-          <button data-v="window">Window</button><button data-v="tray">Tray only</button>
-        </div>
-      </div>
-      <div class="sp-line">
-        <span>Closing keeps playing in the tray</span>
-        <button class="switch" id="sp-tray-close" role="switch" aria-checked="false" aria-label="Closing keeps playing in the tray"><span></span></button>
-      </div>
-      <div class="sp-line">
-        <span>Keyboard shortcuts</span>
-        <button class="switch" id="sp-keys" role="switch" aria-checked="false" aria-label="Keyboard shortcuts"><span></span></button>
-      </div>
-      <p class="sp-help" id="sp-keys-help"></p>
-    </section>
-    <section class="sp-section hidden" id="sp-app">
-      <span class="eyebrow">App</span>
-      <div class="sp-line">
-        <span class="sp-update-text">
-          <span id="sp-update-title"></span>
-          <span class="sp-update-sub" id="sp-update-sub"></span>
-        </span>
-        <button class="pill pill-ghost" id="sp-update-btn"></button>
-      </div>
-      <div class="sp-progress hidden" id="sp-progress"><div id="sp-progress-fill"></div></div>
-    </section>
+    <button class="sp-more" id="sp-more">More settings
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+    </button>
   </div>
 
 </div>
@@ -377,14 +415,8 @@
   <button class="ctrl-btn" id="compact-next" aria-label="Next">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5v14"></path><path d="M5 5l10 7-10 7z"></path></svg>
   </button>
-  <button class="ctrl-btn compact-pin hidden" id="compact-pin" aria-pressed="false">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"></path><path d="M12 16v5"></path></svg>
-  </button>
   <button class="ctrl-btn compact-expand hidden" id="compact-expand" aria-label="Full player" title="Full player">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"></path><path d="M20 4l-7 7"></path><path d="M10 20H4v-6"></path><path d="M4 20l7-7"></path></svg>
-  </button>
-  <button class="ctrl-btn compact-close hidden" id="compact-close" aria-label="Close" title="Close">
-    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="#EEE8DF" stroke-width="1.2" stroke-linecap="round"><path d="M1 1l8 8M9 1L1 9"></path></svg>
   </button>
   <div class="compact-seek" id="compact-seek"><div class="compact-seek-fill" id="compact-seek-fill"></div></div>
 </div>

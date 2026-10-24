@@ -2,7 +2,7 @@
 // Electron shell for Groove. The page has to load from http://localhost:8000:
 // that is the origin registered with Google OAuth, and the YouTube player
 // refuses to embed from file://. So the app serves its own files there.
-const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, screen, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, screen, shell, webFrameMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const http = require('http');
 const fs = require('fs');
@@ -79,6 +79,9 @@ function fitToScreen(b) {
   };
 }
 
+// Window opacity per mode (Settings → Appearance, or right-click the strip).
+const opacityFor = (ws, mode) => { const o = ws.opacity && ws.opacity[mode]; return typeof o === 'number' ? Math.min(1, Math.max(0.3, o)) : 1; };
+
 const stripWidth = (w) => Math.round(Math.min(Math.max(w || COMPACT.width, COMPACT.minWidth), COMPACT.maxWidth));
 
 // Measured sizes of a frameless window can come back scaled when monitors use
@@ -128,6 +131,7 @@ function applyMode(win, ws, mode) {
   }
   // "Keep on top" is a strip setting; the full window behaves normally.
   win.setAlwaysOnTop(mode === 'compact' && !!ws.pinned);
+  win.setOpacity(opacityFor(ws, mode));
   // Landing on a monitor with different scaling can leave the page laid out
   // for the old size until the window is resized; a 1px nudge does that.
   const target = ws[mode];
@@ -192,7 +196,7 @@ const fromLogin = process.argv.includes(LOGIN_ARGS[0]);
 let quitting = false;
 app.on('before-quit', () => { quitting = true; });
 
-function setupDesktop(win, ws) {
+function setupDesktop(win, ws, switchMode) {
   const d = ws.desktop = { startInTray: false, closeToTray: false, shortcuts: true, ...(ws.desktop || {}) };
   const send = (cmd) => { if (!win.isDestroyed()) win.webContents.send('bside:command', cmd); };
   const showWindow = () => { if (win.isMinimized()) win.restore(); win.show(); win.focus(); };
@@ -244,6 +248,7 @@ function setupDesktop(win, ws) {
 
   // Startup at sign-in only makes sense for the installed app.
   const settings = () => ({
+    opacityCompact: opacityFor(ws, 'compact'), opacityFull: opacityFor(ws, 'full'),
     canStartup: app.isPackaged,
     openAtLogin: app.isPackaged && app.getLoginItemSettings({ args: LOGIN_ARGS }).openAtLogin,
     startInTray: d.startInTray, closeToTray: d.closeToTray, shortcuts: d.shortcuts,
@@ -256,12 +261,78 @@ function setupDesktop(win, ws) {
       for (const k of ['startInTray', 'closeToTray', 'shortcuts']) if (k in patch) d[k] = !!patch[k];
       if ('shortcuts' in patch) applyShortcuts();
       if ('pinned' in patch) { ws.pinned = !!patch.pinned; win.setAlwaysOnTop(ws.mode === 'compact' && ws.pinned); }
+      for (const [key, mode] of [['opacityCompact', 'compact'], ['opacityFull', 'full']]) {
+        if (typeof patch[key] !== 'number') continue;
+        ws.opacity = { ...(ws.opacity || {}), [mode]: Math.min(1, Math.max(0.3, patch[key])) };
+        if (ws.mode === mode) win.setOpacity(opacityFor(ws, mode));
+      }
       saveWindowState(ws);
     }
     return settings();
   });
 
+  // Right-click on the mini strip: a native menu, since the 72px window has no
+  // room for one of its own.
+  const changed = () => { if (!win.isDestroyed()) win.webContents.send('bside:settings-changed', settings()); };
+  ipcMain.on('bside:strip-menu', (e, info) => {
+    if (e.sender !== win.webContents || !info) return;
+    const vol = info.muted ? 0 : Math.round(info.volume);
+    const opacity = Math.round(opacityFor(ws, 'compact') * 100);
+    Menu.buildFromTemplate([
+      { label: 'Volume ' + vol + '%', enabled: false },
+      { label: 'Set volume', submenu: [100, 75, 50, 35, 25, 15, 10, 5].map((v) => ({ label: v + '%', type: 'radio', checked: vol === v, click: () => send({ type: 'volume', value: v }) })) },
+      { label: info.muted ? 'Unmute' : 'Mute', click: () => send({ type: 'mute' }) },
+      { type: 'separator' },
+      { label: 'Keep on top', type: 'checkbox', checked: !!ws.pinned, click: (item) => { ws.pinned = item.checked; win.setAlwaysOnTop(ws.mode === 'compact' && ws.pinned); saveWindowState(ws); changed(); } },
+      { label: 'Opacity', submenu: [100, 90, 80, 70, 60, 50, 40].map((p) => ({ label: p + '%', type: 'radio', checked: opacity === p, click: () => { ws.opacity = { ...(ws.opacity || {}), compact: p / 100 }; win.setOpacity(p / 100); saveWindowState(ws); changed(); } })) },
+      { type: 'separator' },
+      { label: 'Open full player', click: () => switchMode('full') },
+      { label: 'Close', click: () => win.close() }
+    ]).popup({ window: win });
+  });
+
   return { showWindow, startHidden: fromLogin && d.startInTray };
+}
+
+// ---------- fine volume ----------
+// The YouTube player only takes whole-number volumes (1% is its quietest),
+// too coarse for a volume curve that should whisper at the bottom. So the
+// YouTube frames get a small patch: whatever volume the player sets on its
+// <video> is multiplied by Groove's gain, at full precision. The player's
+// own volume (and fades) keep working on top.
+
+const GAIN_PATCH = `(() => {
+  if (!window.__grooveSetGain) {
+    const real = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
+    const wanted = new WeakMap();
+    let gain = 1;
+    Object.defineProperty(HTMLMediaElement.prototype, 'volume', {
+      configurable: true,
+      get() { return wanted.has(this) ? wanted.get(this) : real.get.call(this); },
+      set(v) { wanted.set(this, v); real.set.call(this, Math.max(0, Math.min(1, v * gain))); }
+    });
+    window.__grooveActualVolume = (m) => real.get.call(m);
+    window.__grooveSetGain = (g) => {
+      gain = g;
+      document.querySelectorAll('video, audio').forEach((m) => { m.volume = wanted.has(m) ? wanted.get(m) : real.get.call(m); });
+    };
+  }
+})()`;
+const isYouTubeFrame = (f) => !!f && /^https:\/\/www\.youtube(-nocookie)?\.com\/embed\//.test(f.url);
+
+function setupOutputGain(win) {
+  let gain = 1;
+  const apply = (frame) => frame.executeJavaScript(GAIN_PATCH + `; window.__grooveSetGain(${gain});`).catch(() => {});
+  // A YouTube player (re)loaded: patch it and give it the current gain.
+  win.webContents.on('did-frame-finish-load', (e, isMain, processId, routingId) => {
+    const frame = webFrameMain.fromId(processId, routingId);
+    if (isYouTubeFrame(frame)) apply(frame);
+  });
+  ipcMain.on('bside:gain', (e, g) => {
+    if (e.sender !== win.webContents || typeof g !== 'number' || !(g >= 0 && g <= 1)) return;
+    gain = g;
+    win.webContents.mainFrame.framesInSubtree.filter(isYouTubeFrame).forEach(apply);
+  });
 }
 
 function createWindow() {
@@ -284,13 +355,19 @@ function createWindow() {
   // No menu bar: with one, Alt would pop it open inside the compact strip.
   win.removeMenu();
   applyMode(win, ws, ws.mode === 'compact' ? 'compact' : 'full');
-  const desktop = setupDesktop(win, ws);
+  let saveTimer = null;
+  const switchMode = (mode) => {
+    if (mode === ws.mode) return;
+    clearTimeout(saveTimer);
+    if (!win.isMaximized() && !win.isFullScreen()) ws[ws.mode] = currentBounds(win, ws.mode);
+    applyMode(win, ws, mode);
+  };
+  const desktop = setupDesktop(win, ws, switchMode);
   // Opened at sign-in with "tray only": stay hidden until the tray icon is clicked.
   win.once('ready-to-show', () => { if (!desktop.startHidden) win.show(); });
   win.showFromTray = desktop.showWindow;
 
   // Remember where each mode's window was left.
-  let saveTimer = null;
   const remember = () => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
@@ -322,12 +399,7 @@ function createWindow() {
   });
 
   ipcMain.on('bside:set-compact', (e, on) => {
-    if (e.sender !== win.webContents) return;
-    const mode = on ? 'compact' : 'full';
-    if (mode === ws.mode) return;
-    clearTimeout(saveTimer);
-    if (!win.isMaximized() && !win.isFullScreen()) ws[ws.mode] = currentBounds(win, ws.mode);
-    applyMode(win, ws, mode);
+    if (e.sender === win.webContents) switchMode(on ? 'compact' : 'full');
   });
 
   setupUpdates(win);
@@ -346,6 +418,8 @@ function createWindow() {
   win.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith(`http://localhost:${PORT}/`)) { e.preventDefault(); shell.openExternal(url); }
   });
+
+  setupOutputGain(win);
 
   win.loadURL(`http://localhost:${PORT}/`);
   return win;

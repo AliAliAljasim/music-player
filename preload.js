@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('bsideShell', {
   settings: (patch) => ipcRenderer.invoke('bside:settings', patch || null),
   onCommand: (fn) => ipcRenderer.on('bside:command', (e, cmd) => fn(cmd)),
   setNowPlaying: (info) => ipcRenderer.send('bside:now-playing', info),
+  setOutputGain: (g) => ipcRenderer.send('bside:gain', g),
+  showStripMenu: (info) => ipcRenderer.send('bside:strip-menu', info),
+  onSettingsChanged: (fn) => ipcRenderer.on('bside:settings-changed', (e, s) => fn(s)),
   updates: {
     status: () => ipcRenderer.invoke('bside:update', 'status'),
     check: () => ipcRenderer.invoke('bside:update', 'check'),
