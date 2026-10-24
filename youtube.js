@@ -117,13 +117,35 @@ window.BSideYouTube = (() => {
     return { name: ch.snippet.title, avatar: (th.default || th.medium || {}).url || '' };
   }
 
+  // Every page of a list endpoint (50 items a page). The cap only guards
+  // against a runaway loop; it's far above any real library.
+  const MAX_PAGES = 200;
+  async function allItems(path, params) {
+    const out = [];
+    let pageToken = '';
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const j = await api(path, { ...params, maxResults: 50, ...(pageToken ? { pageToken } : {}) });
+      out.push(...(j.items || []));
+      pageToken = j.nextPageToken;
+      if (!pageToken) break;
+    }
+    return out;
+  }
+
+  // Video details for any number of ids, 50 per request, in parallel.
+  async function videoDetails(ids) {
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
+    const pages = await Promise.all(chunks.map((c) => api('videos', { ...VIDEO_PARTS, id: c.join(','), maxResults: 50 })));
+    return pages.flatMap((j) => j.items || []);
+  }
+
   async function playlistTracks(id, keep = isMusic) {
-    const items = await api('playlistItems', { part: 'contentDetails', playlistId: id, maxResults: 50 });
-    const ids = items.items.map((i) => i.contentDetails.videoId);
+    const items = await allItems('playlistItems', { part: 'contentDetails', playlistId: id });
+    const ids = items.map((i) => i.contentDetails.videoId);
     if (!ids.length) return [];
     // Deleted, private and filtered-out videos drop out here; keep the playlist's order.
-    const vids = await api('videos', { ...VIDEO_PARTS, id: ids.join(','), maxResults: 50 });
-    const byId = new Map(vids.items.filter(keep).map((v) => [v.id, v]));
+    const byId = new Map((await videoDetails(ids)).filter(keep).map((v) => [v.id, v]));
     return ids.filter((i) => byId.has(i)).map((i) => trackFromVideo(byId.get(i)));
   }
 
@@ -136,8 +158,8 @@ window.BSideYouTube = (() => {
     } catch (e) {
       if (!token) throw e; // session expired, not just LM being unavailable
     }
-    const liked = await api('videos', { ...VIDEO_PARTS, myRating: 'like', maxResults: 50 });
-    return liked.items.filter(isMusic).map(trackFromVideo);
+    const liked = await allItems('videos', { ...VIDEO_PARTS, myRating: 'like' });
+    return liked.filter(isMusic).map(trackFromVideo);
   }
 
   // The playlist's own cover, as YouTube Music shows it. A playlist whose
@@ -147,17 +169,27 @@ window.BSideYouTube = (() => {
     return c && !/no_thumbnail/.test(c.url) ? c : null;
   }
 
-  // Liked music first, then the user's playlists (first 50 songs of each).
+  // Liked music first, then all of the user's playlists, every song.
   async function library() {
     const [likedTracks, pls] = await Promise.all([
       likedMusic(),
-      api('playlists', { part: 'snippet,contentDetails', mine: 'true', maxResults: 50 })
+      allItems('playlists', { part: 'snippet,contentDetails', mine: 'true' })
     ]);
-    const lists = await Promise.all(pls.items
+    const lists = await Promise.all(pls
       .filter((p) => p.contentDetails.itemCount > 0)
       .map(async (p) => ({ id: p.id, name: p.snippet.title, tracks: await playlistTracks(p.id), cover: playlistCover(p) })));
     const out = likedTracks.length ? [{ id: 'LM', name: 'Liked music', tracks: likedTracks, cover: null }] : [];
     return out.concat(lists.filter((l) => l.tracks.length));
+  }
+
+  // Music videos matching a query, as tracks. A search costs 100 of the
+  // API's 10,000 daily quota units, so the app only searches YouTube on Enter.
+  async function search(q) {
+    const j = await api('search', { part: 'id', type: 'video', videoCategoryId: MUSIC_CATEGORY, q, maxResults: 25 });
+    const ids = (j.items || []).map((i) => i.id.videoId).filter(Boolean);
+    if (!ids.length) return [];
+    const byId = new Map((await videoDetails(ids)).filter((v) => !isShort(v)).map((v) => [v.id, v]));
+    return ids.filter((i) => byId.has(i)).map((i) => trackFromVideo(byId.get(i)));
   }
 
   // ---------- playback ----------
@@ -325,7 +357,7 @@ window.BSideYouTube = (() => {
   return {
     configured: !!clientId,
     signedIn: () => !!token,
-    signIn, signOut, profile, library, ensurePlayer,
+    signIn, signOut, profile, library, search, ensurePlayer,
     onEnded: (fn) => { onEnded = fn; },
     onError: (fn) => { onError = fn; },
     // Playing/paused as the player reports it, including changes made outside

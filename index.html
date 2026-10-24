@@ -33,6 +33,10 @@
       <span class="word">b&middot;side</span>
     </button>
     <nav class="topnav" id="topnav"></nav>
+    <label class="search-box" id="search-box">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
+      <input type="search" id="search-input" placeholder="Search songs" aria-label="Search songs" autocomplete="off" spellcheck="false">
+    </label>
     <div class="topbar-right" id="topbar-right"></div>
     <div class="topbar-tools">
       <button class="tool-btn hidden" id="btn-compact" aria-label="Mini player" title="Mini player">
@@ -64,6 +68,21 @@
     </section>
   </main>
 
+  <!-- SEARCH -->
+  <main class="view view-search" id="view-search">
+    <section class="search-section" id="search-library">
+      <h2>In your library</h2>
+      <div class="result-rows" id="search-library-rows"></div>
+    </section>
+    <section class="search-section">
+      <div class="search-yt-head">
+        <h2>YouTube Music</h2>
+        <span class="muted" id="search-yt-hint"></span>
+      </div>
+      <div class="result-rows" id="search-yt-rows"></div>
+    </section>
+  </main>
+
   <!-- PLAYLIST -->
   <main class="view view-list" id="view-list">
     <button class="back-link" id="list-back">
@@ -86,7 +105,7 @@
       </button>
     </div>
     <div class="list-columns">
-      <span>#</span><span>Title</span><span>Artist</span><span class="right">Time</span>
+      <span>#</span><span>Title</span><span>Artist</span><span class="right">Time</span><span></span>
     </div>
     <div class="list-rows" id="list-rows"></div>
   </main>
@@ -114,6 +133,10 @@
   <main class="view view-player" id="view-player">
     <button class="player-dismiss" id="player-dismiss" aria-label="Back to library" title="Back to library">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg>
+    </button>
+    <button class="player-lyrics-btn" id="player-lyrics" aria-pressed="false">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"></path><path d="M4 11h12"></path><path d="M4 16h8"></path><path d="M18 13v7"></path><circle cx="16" cy="20" r="2"></circle></svg>
+      Lyrics
     </button>
     <div class="stage" id="stage">
       <div class="stage-inner" id="stage-inner">
@@ -167,6 +190,10 @@
               <div class="pivot-cap-outer"></div>
               <div class="pivot-cap-inner"></div>
             </div>
+          </div>
+
+          <div class="lyrics hidden" id="lyrics">
+            <div class="lyrics-lines" id="lyrics-lines"></div>
           </div>
 
           <div class="transport">
@@ -227,6 +254,8 @@
     </div>
   </div>
 
+  <div class="song-menu hidden" id="song-menu" role="menu"></div>
+
   <!-- QUEUE -->
   <div class="queue-panel hidden" id="queue-panel" role="dialog" aria-label="Queue">
     <div class="qp-head">
@@ -249,6 +278,13 @@
         <div class="segmented" id="sp-repeat" role="group" aria-label="Repeat">
           <button data-v="off">Off</button><button data-v="all">Playlist</button><button data-v="one">Song</button>
         </div>
+      </div>
+      <div class="sp-line">
+        <span>Sleep timer</span>
+        <span class="sp-sleep-left" id="sp-sleep-left"></span>
+      </div>
+      <div class="segmented sp-sleep" id="sp-sleep" role="group" aria-label="Sleep timer">
+        <button data-v="0">Off</button><button data-v="15">15m</button><button data-v="30">30m</button><button data-v="60">1h</button><button data-v="end">End of song</button>
       </div>
     </section>
     <section class="sp-section">
@@ -279,6 +315,28 @@
       <span class="eyebrow">YouTube Music</span>
       <div id="sp-account"></div>
     </section>
+    <section class="sp-section hidden" id="sp-desktop">
+      <span class="eyebrow">Desktop</span>
+      <div class="sp-line">
+        <span>Open at sign-in</span>
+        <button class="switch" id="sp-login" role="switch" aria-checked="false" aria-label="Open at sign-in"><span></span></button>
+      </div>
+      <div class="sp-line" id="sp-login-mode-row">
+        <span>Opens as</span>
+        <div class="segmented" id="sp-login-mode" role="group" aria-label="Opens as">
+          <button data-v="window">Window</button><button data-v="tray">Tray only</button>
+        </div>
+      </div>
+      <div class="sp-line">
+        <span>Closing keeps playing in the tray</span>
+        <button class="switch" id="sp-tray-close" role="switch" aria-checked="false" aria-label="Closing keeps playing in the tray"><span></span></button>
+      </div>
+      <div class="sp-line">
+        <span>Keyboard shortcuts</span>
+        <button class="switch" id="sp-keys" role="switch" aria-checked="false" aria-label="Keyboard shortcuts"><span></span></button>
+      </div>
+      <p class="sp-help" id="sp-keys-help"></p>
+    </section>
     <section class="sp-section hidden" id="sp-app">
       <span class="eyebrow">App</span>
       <div class="sp-line">
@@ -307,6 +365,9 @@
   <button class="ctrl-btn compact-play" id="compact-toggle" aria-label="Play or pause"></button>
   <button class="ctrl-btn" id="compact-next" aria-label="Next">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 5v14"></path><path d="M5 5l10 7-10 7z"></path></svg>
+  </button>
+  <button class="ctrl-btn compact-pin hidden" id="compact-pin" aria-pressed="false">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4h6l-1 6 3 3H7l3-3-1-6z"></path><path d="M12 16v5"></path></svg>
   </button>
   <button class="ctrl-btn compact-expand hidden" id="compact-expand" aria-label="Full player" title="Full player">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"></path><path d="M20 4l-7 7"></path><path d="M10 20H4v-6"></path><path d="M4 20l7-7"></path></svg>

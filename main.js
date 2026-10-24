@@ -2,7 +2,7 @@
 // Electron shell for b·side. The page has to load from http://localhost:8000:
 // that is the origin registered with Google OAuth, and the YouTube player
 // refuses to embed from file://. So the app serves its own files there.
-const { app, BrowserWindow, dialog, ipcMain, screen, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, screen, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const http = require('http');
 const fs = require('fs');
@@ -126,6 +126,8 @@ function applyMode(win, ws, mode) {
     win.setBounds(ws.full);
     win.setMinimumSize(FULL.minWidth, FULL.minHeight);
   }
+  // "Keep on top" is a strip setting; the full window behaves normally.
+  win.setAlwaysOnTop(mode === 'compact' && !!ws.pinned);
   // Landing on a monitor with different scaling can leave the page laid out
   // for the old size until the window is resized; a 1px nudge does that.
   const target = ws[mode];
@@ -165,11 +167,101 @@ function setupUpdates(win) {
   autoUpdater.on('update-not-available', () => set({ state: 'latest' }));
   autoUpdater.on('download-progress', (p) => set({ state: 'downloading', percent: Math.floor(p.percent) }));
   autoUpdater.on('update-downloaded', (info) => set({ state: 'ready', next: info.version }));
+  autoUpdater.on('before-quit-for-update', () => { quitting = true; });
   autoUpdater.on('error', (err) => set({ state: 'error', message: String((err && err.message) || err).split('\n')[0] }));
 
   const check = () => { if (status.state !== 'downloading' && status.state !== 'ready') autoUpdater.checkForUpdates().catch(() => {}); };
   setTimeout(check, 8000);
   setInterval(check, 6 * 60 * 60 * 1000);
+}
+
+// ---------- desktop: tray, startup, shortcuts ----------
+// A tray icon while the app runs (click to show, right-click for playback
+// controls); optional start at Windows sign-in, as a window or tray-only;
+// optional "close keeps playing in the tray"; global Ctrl+Alt shortcuts.
+
+const SHORTCUTS = [
+  ['CommandOrControl+Alt+Space', 'toggle'],
+  ['CommandOrControl+Alt+Right', 'next'],
+  ['CommandOrControl+Alt+Left', 'prev'],
+  ['CommandOrControl+Alt+Up', 'volup'],
+  ['CommandOrControl+Alt+Down', 'voldown']
+];
+const LOGIN_ARGS = ['--from-login'];
+const fromLogin = process.argv.includes(LOGIN_ARGS[0]);
+let quitting = false;
+app.on('before-quit', () => { quitting = true; });
+
+function setupDesktop(win, ws) {
+  const d = ws.desktop = { startInTray: false, closeToTray: false, shortcuts: true, ...(ws.desktop || {}) };
+  const send = (cmd) => { if (!win.isDestroyed()) win.webContents.send('bside:command', cmd); };
+  const showWindow = () => { if (win.isMinimized()) win.restore(); win.show(); win.focus(); };
+
+  // A tray problem must never stop the window from opening.
+  let tray = null;
+  try {
+    tray = new Tray(path.join(__dirname, 'build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'));
+  } catch (e) { /* no tray on this system */ }
+  let now = { title: '', artist: '', playing: false };
+  const buildMenu = () => tray && tray.setContextMenu(Menu.buildFromTemplate([
+    { label: now.title ? (now.title + (now.artist ? ' — ' + now.artist : '')).slice(0, 60) : 'b·side', enabled: false },
+    { type: 'separator' },
+    { label: now.playing ? 'Pause' : 'Play', click: () => send('toggle') },
+    { label: 'Next', click: () => send('next') },
+    { label: 'Previous', click: () => send('prev') },
+    { type: 'separator' },
+    { label: 'Show b·side', click: showWindow },
+    { label: 'Quit', click: () => { quitting = true; app.quit(); } }
+  ]));
+  if (tray) {
+    tray.setToolTip('b·side');
+    buildMenu();
+    tray.on('click', showWindow);
+  }
+  ipcMain.on('bside:now-playing', (e, info) => {
+    if (e.sender !== win.webContents || !info) return;
+    now = { title: String(info.title || ''), artist: String(info.artist || ''), playing: !!info.playing };
+    if (!tray) return;
+    tray.setToolTip((now.title ? now.title + (now.artist ? ' — ' + now.artist : '') : 'b·side').slice(0, 127));
+    buildMenu();
+  });
+
+  win.on('close', (e) => { if (tray && d.closeToTray && !quitting) { e.preventDefault(); win.hide(); } });
+
+  let shortcutErrors = [];
+  const applyShortcuts = () => {
+    globalShortcut.unregisterAll();
+    shortcutErrors = [];
+    if (!d.shortcuts) return;
+    for (const [accel, cmd] of SHORTCUTS) {
+      let ok = false;
+      try { ok = globalShortcut.register(accel, () => send(cmd)); } catch (e) { /* invalid on this system */ }
+      if (!ok) shortcutErrors.push(accel.replace('CommandOrControl', 'Ctrl'));
+    }
+  };
+  applyShortcuts();
+  app.on('will-quit', () => globalShortcut.unregisterAll());
+
+  // Startup at sign-in only makes sense for the installed app.
+  const settings = () => ({
+    canStartup: app.isPackaged,
+    openAtLogin: app.isPackaged && app.getLoginItemSettings({ args: LOGIN_ARGS }).openAtLogin,
+    startInTray: d.startInTray, closeToTray: d.closeToTray, shortcuts: d.shortcuts,
+    shortcutErrors, pinned: !!ws.pinned
+  });
+  ipcMain.handle('bside:settings', (e, patch) => {
+    if (e.sender !== win.webContents) return settings();
+    if (patch) {
+      if ('openAtLogin' in patch && app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!patch.openAtLogin, args: LOGIN_ARGS });
+      for (const k of ['startInTray', 'closeToTray', 'shortcuts']) if (k in patch) d[k] = !!patch[k];
+      if ('shortcuts' in patch) applyShortcuts();
+      if ('pinned' in patch) { ws.pinned = !!patch.pinned; win.setAlwaysOnTop(ws.mode === 'compact' && ws.pinned); }
+      saveWindowState(ws);
+    }
+    return settings();
+  });
+
+  return { showWindow, startHidden: fromLogin && d.startInTray };
 }
 
 function createWindow() {
@@ -192,7 +284,10 @@ function createWindow() {
   // No menu bar: with one, Alt would pop it open inside the compact strip.
   win.removeMenu();
   applyMode(win, ws, ws.mode === 'compact' ? 'compact' : 'full');
-  win.once('ready-to-show', () => win.show());
+  const desktop = setupDesktop(win, ws);
+  // Opened at sign-in with "tray only": stay hidden until the tray icon is clicked.
+  win.once('ready-to-show', () => { if (!desktop.startHidden) win.show(); });
+  win.showFromTray = desktop.showWindow;
 
   // Remember where each mode's window was left.
   let saveTimer = null;
@@ -265,7 +360,7 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   let mainWin = null;
   app.on('second-instance', () => {
-    if (mainWin && !mainWin.isDestroyed()) { if (mainWin.isMinimized()) mainWin.restore(); mainWin.focus(); }
+    if (mainWin && !mainWin.isDestroyed()) mainWin.showFromTray();
   });
   app.whenReady().then(async () => {
     try {

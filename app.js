@@ -55,7 +55,7 @@
 
   // Playback preferences, remembered between visits. fade and crossfade are seconds (0 = off).
   const PREFS_KEY = 'bside.prefs';
-  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0 };
+  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false };
 
   function loadPrefs() {
     try {
@@ -70,6 +70,8 @@
     view: 'player', openId: 1, plId: 1, idx: 2, pos: 0,
     playing: false, pick: null, rpm: 33, zoom: 1,
     account: null, syncing: false, ytError: '', notice: '', panel: null, volumeHint: false,
+    qTrack: null, menu: null, sleep: null,
+    search: { q: '', ytQ: '', yt: null, loading: false, error: '' },
     ...PREFS, ...loadPrefs()
   };
 
@@ -134,13 +136,40 @@
     return out;
   }
 
-  // What plays when the current track finishes; null at the end of the playlist.
-  function nextAuto() {
-    const loops = !isBlocked(state.plId, state.idx);
-    if (state.repeat === 'one' && loops) return state.idx;
-    const [j] = walk(1, 1, state.repeat === 'all');
-    if (j != null) return j;
-    return state.repeat === 'all' && loops ? state.idx : null;
+  // ---------- queue ----------
+  // "Play next" / "Add to queue" songs (and songs played from search) play
+  // ahead of the playlist. While one plays it is `state.qTrack`; the playlist
+  // position (plId/idx) stays put, so the playlist carries on from there once
+  // the queue runs out.
+
+  let userQueue = []; // tracks waiting to play, in order
+
+  const playable = (t) => !(t[3] && blocked.has(t[3]));
+
+  // The song playing now: a queued one, or the playlist's current song.
+  function nowTrack() { return state.qTrack || DATA[state.plId].tracks[state.idx]; }
+
+  // Where to go next. `auto`: the song finished (repeat applies, and with
+  // repeat off the playlist can end). Returns { repeat } | { queue } |
+  // { idx } | null for the end of the playlist.
+  function nextMove(auto, ignoreRepeatOne) {
+    if (auto && !ignoreRepeatOne && state.repeat === 'one' && playable(nowTrack())) return { repeat: true };
+    while (userQueue.length && !playable(userQueue[0])) userQueue.shift();
+    if (userQueue.length) return { queue: true };
+    const [j] = walk(1, 1, !auto || state.repeat === 'all');
+    if (j != null) return { idx: j };
+    // After a queued song the playlist's own song is next, even if it's the only one.
+    if (state.qTrack && playable(DATA[state.plId].tracks[state.idx])) return { idx: state.idx };
+    return auto && state.repeat === 'all' && playable(nowTrack()) ? { repeat: true } : null;
+  }
+
+  // Apply a move to the state (no player calls) and return the new song.
+  function applyMove(m) {
+    if (m && m.repeat) setState({ pos: 0 });
+    else if (m && m.queue) setState({ qTrack: userQueue.shift(), pos: 0, pick: null });
+    else if (m) setState({ qTrack: null, idx: m.idx, pos: 0, pick: null });
+    else setState({ qTrack: null, idx: order[0], pos: 0, playing: false, pick: null });
+    return nowTrack();
   }
 
   // ---------- helpers (ported from the design's Component class) ----------
@@ -151,33 +180,78 @@
     return m + ':' + (r < 10 ? '0' : '') + r;
   }
 
-  // Manual next/previous: always wraps, whatever the repeat mode.
-  // Manual next/previous wrap around, except going back past the first song
-  // with shuffle off.
+  // Next takes from the queue first and wraps around the playlist. Previous
+  // during a queued song goes back to the playlist's song; otherwise it wraps,
+  // except going back past the first song with shuffle off.
   function step(d) {
-    const [j] = walk(d, 1, d > 0 || state.shuffle);
-    setState({ idx: j == null ? state.idx : j, pos: 0, pick: null });
+    if (d > 0) {
+      const m = nextMove(false);
+      if (m) applyMove(m); else setState({ pos: 0 });
+    } else if (state.qTrack) {
+      setState({ qTrack: null, pos: 0, pick: null });
+    } else {
+      const [j] = walk(-1, 1, state.shuffle);
+      setState({ idx: j == null ? state.idx : j, pos: 0, pick: null });
+    }
     ytSync(0);
   }
 
   // With shuffle off, previous stops at the first song: still a restart if
   // it has played a few seconds, then greyed out.
   function canGoBack() {
-    return state.shuffle || state.pos > 3 || walk(-1, 1, false).length > 0;
+    return !!state.qTrack || state.shuffle || state.pos > 3 || walk(-1, 1, false).length > 0;
   }
 
   // The current track finished (or couldn't play): move on, or stop at the end.
-  function advance(j = nextAuto()) {
-    if (j == null) setState({ idx: order[0], pos: 0, playing: false, pick: null });
-    else setState({ idx: j, pos: 0, pick: null });
+  function advance(m = nextMove(true)) {
+    applyMove(m);
     ytSync(0);
+  }
+
+  // ---------- sleep timer ----------
+  // After N minutes the music fades out slowly and pauses; "end of song" lets
+  // the current song finish (no crossfade) and stops there.
+
+  const SLEEP_FADE_MS = 8000;
+
+  function setSleep(v) {
+    if (v === 'end') setState({ sleep: { end: true } });
+    else if (+v > 0) setState({ sleep: { min: +v, at: Date.now() + v * 60000 } });
+    else setState({ sleep: null });
+  }
+
+  function sleepNow() {
+    setState({ sleep: null, playing: false });
+    if (nowTrack()[3]) yt.player.pause(SLEEP_FADE_MS);
+    notify('Sleep timer: music stopped.');
+  }
+
+  // A song played to the end: the sleep timer may stop here, otherwise move on.
+  function songEnded() {
+    if (state.sleep && state.sleep.end) {
+      setState({ sleep: null, playing: false, pos: 0 });
+      notify('Sleep timer: music stopped.');
+      return;
+    }
+    advance();
   }
 
   // keepOrder: jumping within the current queue (Up next) keeps the shuffle.
   function play(plId, idx, keepOrder) {
     if (plId !== state.plId || !keepOrder) buildOrder(plId, idx);
-    setState({ plId, idx, pos: 0, playing: true, view: 'player', pick: null });
+    setState({ plId, idx, qTrack: null, pos: 0, playing: true, view: 'player', pick: null });
     ytSync(0);
+  }
+
+  // A song from outside the playlist order (search, or picked from the queue).
+  function playNow(track) {
+    setState({ qTrack: track, pos: 0, playing: true, pick: null });
+    ytSync(0);
+  }
+
+  function enqueue(track, next) {
+    if (next) userQueue.unshift(track); else userQueue.push(track);
+    notify((next ? 'Playing next: ' : 'Added to queue: ') + track[0]);
   }
 
   // ---------- YouTube ----------
@@ -188,7 +262,7 @@
   const fadeMs = () => state.fade * 1000;
 
   function ytSync(seekTo) {
-    const t = DATA[state.plId].tracks[state.idx];
+    const t = nowTrack();
     if (!t[3]) return;
     if (ytLoaded !== t[3]) {
       ytLoaded = t[3];
@@ -212,20 +286,26 @@
   function useLibrary(lists, spot) {
     const wasLoaded = ytLoaded;
     DATA.splice(0, DATA.length, ...lists.map((p, i) => ({ id: p.id, name: p.name, color: PL_COLORS[i % PL_COLORS.length], tracks: p.tracks, cover: p.cover })));
-    const plId = spot ? DATA.findIndex((p) => p.id && p.id === spot.pl) : -1;
-    const idx = plId >= 0 ? DATA[plId].tracks.findIndex((t) => t[3] && t[3] === spot.vid) : -1;
+    if (spot && Array.isArray(spot.queue)) userQueue = spot.queue;
+    let plId = spot ? DATA.findIndex((p) => p.id && p.id === spot.pl) : -1;
+    let idx = plId >= 0 ? DATA[plId].tracks.findIndex((t) => t[3] && t[3] === spot.vid) : -1;
+    const qTrack = spot && Array.isArray(spot.qt) ? spot.qt : null;
     if (idx < 0) {
-      ytLoaded = null;
-      buildOrder(0, 0);
-      setState({ openId: 0, plId: 0, idx: 0, pos: 0, playing: false, pick: null });
-      return;
+      if (!qTrack) {
+        ytLoaded = null;
+        buildOrder(0, 0);
+        setState({ openId: 0, plId: 0, idx: 0, qTrack: null, pos: 0, playing: false, pick: null });
+        return;
+      }
+      plId = 0; idx = 0;
     }
+    const now = qTrack || DATA[plId].tracks[idx];
     // A refresh mid-song finds the same video still on the player: leave it be.
-    const same = wasLoaded === DATA[plId].tracks[idx][3];
+    const same = wasLoaded === now[3];
     if (!same) ytLoaded = null;
-    const pos = Math.max(0, Math.min(Math.floor(spot.pos || 0), DATA[plId].tracks[idx][2] - 1));
+    const pos = Math.max(0, Math.min(Math.floor(spot.pos || 0), now[2] - 1));
     buildOrder(plId, idx);
-    setState({ openId: plId, plId, idx, pick: null, ...(same ? {} : { pos, playing: !!spot.play }) });
+    setState({ openId: plId, plId, idx, qTrack, pick: null, ...(same ? {} : { pos, playing: !!spot.play }) });
     if (!same) ytSync();
   }
 
@@ -239,7 +319,8 @@
 
   function currentSpot() {
     const pl = DATA[state.plId], t = pl.tracks[state.idx];
-    return pl.id && t[3] ? { pl: pl.id, vid: t[3], pos: state.pos } : null;
+    if (!pl.id || !t[3]) return null;
+    return { pl: pl.id, vid: t[3], pos: state.pos, qt: state.qTrack, queue: userQueue.slice(0, 200) };
   }
 
   function savedSpot() {
@@ -264,15 +345,16 @@
 
   function maybeCrossfade(t) {
     const xf = state.crossfade;
-    if (!xf || Date.now() - xfStarted < xf * 1000 + 3000) return;
+    if (!xf || (state.sleep && state.sleep.end) || Date.now() - xfStarted < xf * 1000 + 3000) return;
     const dur = yt.player.duration() || t[2];
     if (dur < xf * 2 + 10 || dur - yt.player.time() > xf) return;
-    const j = nextAuto();
-    const next = j == null ? null : DATA[state.plId].tracks[j];
-    if (!next || !next[3]) return;
+    const m = nextMove(true);
+    if (!m) return;
+    const next = m.repeat ? nowTrack() : m.queue ? userQueue[0] : DATA[state.plId].tracks[m.idx];
+    if (!next[3]) return;
     xfStarted = Date.now();
     ytLoaded = next[3];
-    setState({ idx: j, pos: 0, pick: null });
+    applyMove(m);
     yt.player.crossfade(next[3], xf * 1000);
   }
 
@@ -283,19 +365,19 @@
   const PLAY_ERRORS = { 100: 'has been removed or made private', 101: "can't be played outside YouTube", 150: "can't be played outside YouTube" };
 
   function onPlayError(code) {
-    const t = DATA[state.plId].tracks[state.idx];
+    const t = nowTrack();
     if (!t[3]) return;
     blocked.add(t[3]);
     if (!state.playing) { render(); return; }
-    if (!walk(1, 1, true).length) {
+    // Repeat-one doesn't apply to a track that can't play.
+    const m = nextMove(true, true);
+    if (!m || (m.idx === state.idx && !state.qTrack)) {
       setState({ playing: false });
-      notify('None of the songs in this playlist can be played here.');
+      notify(state.qTrack ? 'Skipped “' + t[0] + '”: it ' + (PLAY_ERRORS[code] || "couldn't be played") + '.' : 'None of the songs in this playlist can be played here.');
       return;
     }
     notify('Skipped “' + t[0] + '”: it ' + (PLAY_ERRORS[code] || "couldn't be played") + '.');
-    // Repeat-one doesn't apply to a track that can't play.
-    const [j] = walk(1, 1, state.repeat !== 'off');
-    advance(j == null ? null : j);
+    advance(m);
   }
 
   // First load (startup or a new sign-in) lands on the saved song; a refresh
@@ -437,13 +519,17 @@
   }
 
   function artFor(plId, idx, pick) {
+    return trackArt(DATA[plId].tracks[idx] || [], plId * 3 + idx, pick);
+  }
+
+  function trackArt(track, seed, pick) {
     // YouTube tracks use their thumbnail as the cover (and its colours, once
     // sampled); samples get generated art from the fixed palettes.
-    const thumb = (DATA[plId].tracks[idx] || [])[4];
+    const thumb = track[4];
     const tc = thumb && thumbColor(thumb);
     const [c1, c2, c3, c4] = tc
       ? [tc.main, tc.second, mix(tc.main, '#000000', 0.7), mix(tc.main, '#FFFFFF', 0.85)]
-      : PALETTES[(plId * 3 + idx) % PALETTES.length];
+      : PALETTES[seed % PALETTES.length];
     const coverBg = thumb
       ? 'url(' + JSON.stringify(thumb.url) + ') center / ' + thumb.size + ' no-repeat, ' + c3
       : 'radial-gradient(circle at 70% 52%, ' + c2 + ' 0 25%, rgba(0,0,0,0) 25.4%), linear-gradient(162deg, ' + c1 + ' 0 60%, ' + c3 + ' 60% 100%)';
@@ -503,7 +589,7 @@
     }));
 
     const openTracks = DATA[s.openId].tracks.map((t, i) => {
-      const isNow = s.openId === s.plId && i === s.idx;
+      const isNow = !s.qTrack && s.openId === s.plId && i === s.idx;
       return {
         idx: i, num: i + 1, title: t[0], artist: t[1], time: fmt(t[2]),
         color: isNow ? accent : '#EEE8DF', numColor: isNow ? accent : '#8F887E',
@@ -512,9 +598,8 @@
       };
     });
 
-    const tr = DATA[s.plId].tracks;
-    const cur = tr[s.idx];
-    const art = artFor(s.plId, s.idx, s.pick);
+    const cur = nowTrack();
+    const art = s.qTrack ? trackArt(cur, cur[0].length, s.pick) : artFor(s.plId, s.idx, s.pick);
     const views = [['Library', 'home'], ['Now playing', 'player']];
     const navActive = s.view === 'list' ? 'home' : s.view;
 
@@ -650,11 +735,13 @@
     btnPrev: el('btn-prev'), btnToggle: el('btn-toggle'), btnNext: el('btn-next'),
     btnShuffle: el('btn-shuffle'), btnRepeat: el('btn-repeat'),
     btnCompact: el('btn-compact'), btnSettings: el('btn-settings'), btnQueue: el('btn-queue'),
-    queuePanel: el('queue-panel'), qpSource: el('qp-source'), qpList: el('qp-list'),
-    playerDismiss: el('player-dismiss'),
+    queuePanel: el('queue-panel'), qpSource: el('qp-source'), qpList: el('qp-list'), songMenu: el('song-menu'),
+    playerDismiss: el('player-dismiss'), playerLyrics: el('player-lyrics'),
+    lyrics: el('lyrics'), lyricsLines: el('lyrics-lines'), turntable: document.querySelector('.turntable'),
     windowControls: el('window-controls'), winMin: el('win-min'), winMax: el('win-max'), winClose: el('win-close'),
 
     settingsPanel: el('settings-panel'), spShuffle: el('sp-shuffle'), spRepeat: el('sp-repeat'),
+    spSleep: el('sp-sleep'), spSleepLeft: el('sp-sleep-left'),
     spMute: el('sp-mute'), spVolume: el('sp-volume'), spVolumeVal: el('sp-volume-val'),
     spFade: el('sp-fade'), spFadeVal: el('sp-fade-val'), spXf: el('sp-xf'), spXfVal: el('sp-xf-val'),
     spPressing: el('sp-pressing'), spPressingDot: el('sp-pressing-dot'), spPressingName: el('sp-pressing-name'),
@@ -664,9 +751,14 @@
 
     compact: el('compact'), compactArt: el('compact-art'), compactTitle: el('compact-title'), compactArtist: el('compact-artist'),
     compactPrev: el('compact-prev'), compactToggle: el('compact-toggle'), compactNext: el('compact-next'),
-    compactExpand: el('compact-expand'), compactClose: el('compact-close'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
+    compactExpand: el('compact-expand'), compactPin: el('compact-pin'),
+    spDesktop: el('sp-desktop'), spLogin: el('sp-login'), spLoginModeRow: el('sp-login-mode-row'), spLoginMode: el('sp-login-mode'),
+    spTrayClose: el('sp-tray-close'), spKeys: el('sp-keys'), spKeysHelp: el('sp-keys-help'), compactClose: el('compact-close'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
 
     splash: el('splash'), scroller: el('scroller'),
+    searchInput: el('search-input'), viewSearch: el('view-search'),
+    searchLibrary: el('search-library'), searchLibraryRows: el('search-library-rows'),
+    searchYtHint: el('search-yt-hint'), searchYtRows: el('search-yt-rows'),
     viewHome: el('view-home'), viewList: el('view-list'), viewCrate: el('view-crate'), viewPlayer: el('view-player')
   };
 
@@ -675,6 +767,7 @@
   const PLAY_ICON_SM = '<svg width="16" height="16" viewBox="0 0 24 24" fill="#131211"><path d="M7 4.5v15l13-7.5z"></path></svg>';
   const PAUSE_ICON_SM = '<svg width="16" height="16" viewBox="0 0 24 24" fill="#131211"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>';
   const ACCOUNT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"></path></svg>';
+  const MORE_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>';
   const PLAY_TRI_ROW = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#EEE8DF"><path d="M7 4.5v15l13-7.5z"></path></svg>';
   // Mode and volume icons take their size from CSS and their colour from the button.
   const LINE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">';
@@ -766,16 +859,20 @@
     refs.viewList.classList.toggle('active', v.isList);
     refs.viewCrate.classList.toggle('active', v.isCrate);
     refs.viewPlayer.classList.toggle('active', v.isPlayer);
+    refs.viewSearch.classList.toggle('active', state.view === 'search');
 
     renderHome(v);
     renderList(v);
     renderCrate(v);
     renderPlayer(v);
+    renderLyrics();
+    renderSearch();
     renderMinibar(v);
     const back = canGoBack();
     [refs.btnPrev, refs.miniPrev, refs.compactPrev].forEach((b) => { b.disabled = !back; });
     renderSettings(v);
     renderQueue(v);
+    renderMenu();
     syncMediaSession();
     saveSpot();
     renderCompact(v);
@@ -794,6 +891,15 @@
       b.classList.toggle('on', on);
       b.setAttribute('aria-pressed', String(on));
     });
+
+    const sl = state.sleep;
+    refs.spSleep.querySelectorAll('button').forEach((b) => {
+      const on = sl ? (b.dataset.v === 'end' ? !!sl.end : +b.dataset.v === sl.min) : b.dataset.v === '0';
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    refs.spSleepLeft.textContent = !sl ? '' : sl.end ? 'Stops after this song'
+      : 'Stops in ' + Math.max(1, Math.ceil((sl.at - Date.now()) / 60000)) + ' min';
 
     const vol = state.muted ? 0 : state.volume;
     const level = vol === 0 ? 'mute' : vol < 50 ? 'low' : 'high';
@@ -852,8 +958,9 @@
     });
   }
 
-  // Now playing, then everything still to come in play order (shuffled order
-  // when shuffle is on; wraps around when repeating the playlist).
+  // Now playing, then the queue (Play next / Add to queue), then the rest of
+  // the playlist in play order (shuffled order when shuffle is on; wraps
+  // around when repeating the playlist).
   function renderQueue(v) {
     refs.queuePanel.classList.toggle('hidden', state.panel !== 'queue');
     refs.btnQueue.classList.toggle('on', state.panel === 'queue');
@@ -862,30 +969,53 @@
 
     const tr = DATA[state.plId].tracks;
     const upcoming = walk(1, tr.length, state.repeat !== 'off');
-    refs.qpSource.textContent = DATA[state.plId].name + (state.shuffle ? ' · shuffled' : '');
-    rebuild(refs.qpList, JSON.stringify([state.plId, state.idx, upcoming, v.art.coverBg]), () => {
-      const label = (text) => {
-        const n = document.createElement('span');
+    refs.qpSource.textContent = state.shuffle ? 'Shuffle on' : '';
+    rebuild(refs.qpList, JSON.stringify([state.plId, state.idx, state.qTrack, userQueue, upcoming, v.art.coverBg]), () => {
+      const label = (text, action) => {
+        const n = document.createElement('div');
         n.className = 'qp-label';
         n.textContent = text;
+        if (action) {
+          const b = document.createElement('button');
+          b.className = 'qp-clear';
+          b.textContent = action.text;
+          b.addEventListener('click', action.run);
+          n.appendChild(b);
+        }
         refs.qpList.appendChild(n);
       };
-      const row = (j, now) => {
-        const t = tr[j];
-        const b = document.createElement('button');
-        b.className = 'qp-row' + (now ? ' now' : '');
+      const row = (t, cover, opts) => {
+        const b = document.createElement('div');
+        b.className = 'qp-row' + (opts.now ? ' now' : '');
         b.innerHTML = '<span class="qp-cover"></span><span class="qp-meta"><span class="qp-title"></span><span class="qp-artist"></span></span><span class="qp-time"></span>';
-        b.querySelector('.qp-cover').style.background = now ? v.art.coverBg : artFor(state.plId, j).coverBg;
+        b.querySelector('.qp-cover').style.background = cover;
         b.querySelector('.qp-title').textContent = t[0];
         b.querySelector('.qp-artist').textContent = t[1];
         b.querySelector('.qp-time').textContent = fmt(t[2]);
-        if (!now) b.addEventListener('click', () => actions.playTrack(state.plId, j, true));
+        if (opts.play) { b.classList.add('clickable'); b.addEventListener('click', opts.play); }
+        if (opts.remove) {
+          const x = document.createElement('button');
+          x.className = 'qp-remove';
+          x.setAttribute('aria-label', 'Remove from queue');
+          x.title = 'Remove from queue';
+          x.innerHTML = '<svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M1 1l8 8M9 1L1 9"></path></svg>';
+          x.addEventListener('click', (e) => { e.stopPropagation(); opts.remove(); });
+          b.appendChild(x);
+        }
+        if (opts.track) b.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, opts.track); });
         refs.qpList.appendChild(b);
       };
       label('Now playing');
-      row(state.idx, true);
-      label('Up next');
-      upcoming.forEach((j) => row(j, false));
+      row(nowTrack(), v.art.coverBg, { now: true });
+      if (userQueue.length) {
+        label('Next in queue', { text: 'Clear', run: () => { userQueue = []; render(); } });
+        userQueue.forEach((t, k) => row(t, trackArt(t, t[0].length).coverBg, {
+          play: () => { userQueue.splice(k, 1); playNow(t); },
+          remove: () => { userQueue.splice(k, 1); render(); }
+        }));
+      }
+      label('Next from ' + DATA[state.plId].name);
+      upcoming.forEach((j) => row(tr[j], artFor(state.plId, j).coverBg, { play: () => actions.playTrack(state.plId, j, true), track: tr[j] }));
       if (!upcoming.length) {
         const end = document.createElement('span');
         end.className = 'qp-end';
@@ -893,6 +1023,246 @@
         refs.qpList.appendChild(end);
       }
     });
+  }
+
+  // ---------- lyrics ----------
+  // From LRCLIB (lrclib.net: free, no key). YouTube titles are tidied up
+  // ("Artist - Song (Official Video)") before looking them up; synced lyrics
+  // follow the song line by line.
+
+  const lyricsCache = new Map(); // video id -> 'loading' | { synced, lines } | { none } | { instrumental }
+
+  function lyricsQuery(t) {
+    let title = t[0]
+      .replace(/\s*[([][^)\]]*\b(official|video|audio|lyrics?|visuali[sz]er|m\/?v|hd|hq|4k|remaster(ed)?|explicit|color coded|live)\b[^)\]]*[)\]]/gi, '')
+      .replace(/\s*[|｜].*$/, '')
+      .replace(/\s+(ft\.?|feat\.?|featuring)\s.*$/i, '')
+      .replace(/["“”]/g, '')
+      .trim();
+    let artist = t[1].replace(/\s*VEVO$/i, '').replace(/\s*-\s*Topic$/i, '').trim();
+    const split = title.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+    if (split) { artist = split[1].trim(); title = split[2].trim(); }
+    return { title, artist };
+  }
+
+  function parseLrc(lrc) {
+    const lines = [];
+    lrc.split('\n').forEach((l) => {
+      const m = l.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)$/);
+      if (m) lines.push({ t: +m[1] * 60 + +m[2], text: m[3] || '♪' });
+    });
+    return lines;
+  }
+
+  async function lrclib(path, params) {
+    const r = await fetch('https://lrclib.net/api/' + path + '?' + new URLSearchParams(params));
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('Lyrics service error ' + r.status);
+    return r.json();
+  }
+
+  // Best match: drop junk entries (anyone can upload to LRCLIB, and some
+  // exact matches are a single placeholder line), then prefer synced lyrics
+  // close to the song's length, then the fullest.
+  const lineCount = (r) => (r.plainLyrics || r.syncedLyrics || '').split('\n').filter((l) => l.replace(/^\[[^\]]*\]/, '').trim()).length;
+  function pickLyrics(results, duration) {
+    const usable = results.filter((r) => r && (r.instrumental || lineCount(r) >= 4));
+    const close = usable.filter((r) => Math.abs((r.duration || 0) - duration) <= 5);
+    const pool = close.length ? close : usable;
+    const rank = (r) => (r.syncedLyrics ? 1000 : 0) - Math.abs((r.duration || 0) - duration) * 10 + Math.min(lineCount(r), 99);
+    return pool.sort((a, b) => rank(b) - rank(a))[0] || null;
+  }
+
+  async function loadLyrics(t) {
+    const key = t[3];
+    if (!key || lyricsCache.has(key)) return;
+    lyricsCache.set(key, 'loading');
+    const { title, artist } = lyricsQuery(t);
+    let hit = null;
+    try {
+      // Exact match and two searches at once; pick the best of everything.
+      const [exact, byField, byText] = await Promise.all([
+        lrclib('get', { track_name: title, artist_name: artist, duration: Math.round(t[2]) }),
+        lrclib('search', { track_name: title, artist_name: artist }),
+        lrclib('search', { q: artist + ' ' + title })
+      ]);
+      hit = pickLyrics([exact, ...(byField || []), ...(byText || [])], t[2]);
+    } catch (e) {
+      lyricsCache.delete(key); // try again next time
+      render();
+      return;
+    }
+    lyricsCache.set(key, !hit ? { none: true }
+      : hit.instrumental ? { instrumental: true }
+      : hit.syncedLyrics ? { synced: true, lines: parseLrc(hit.syncedLyrics) }
+      : { synced: false, lines: hit.plainLyrics.split('\n').map((text) => ({ text: text || ' ' })) });
+    render();
+  }
+
+  function renderLyrics() {
+    const on = state.lyrics;
+    refs.playerLyrics.classList.toggle('on', on);
+    refs.playerLyrics.setAttribute('aria-pressed', String(on));
+    refs.lyrics.classList.toggle('hidden', !on);
+    refs.turntable.classList.toggle('hidden', on);
+    if (!on) return;
+    const t = nowTrack();
+    if (t[3]) loadLyrics(t);
+    const got = t[3] ? lyricsCache.get(t[3]) : { none: true };
+    refs.lyrics.classList.toggle('plain', !!got && got !== 'loading' && !got.synced);
+    rebuild(refs.lyricsLines, JSON.stringify([t[3] || t[0], got === 'loading' ? 'loading' : !!got && (got.none ? 'none' : got.instrumental ? 'inst' : got.lines.length)]), () => {
+      const note = (text) => {
+        const n = document.createElement('div');
+        n.className = 'lyrics-note';
+        n.textContent = text;
+        refs.lyricsLines.appendChild(n);
+      };
+      if (!got || got === 'loading') return note('Finding lyrics…');
+      if (got.none) return note('No lyrics found for this song.');
+      if (got.instrumental) return note('Instrumental ♪');
+      got.lines.forEach((l) => {
+        const n = document.createElement('div');
+        n.className = 'lyrics-line';
+        n.textContent = l.text;
+        refs.lyricsLines.appendChild(n);
+      });
+      refs.lyrics.scrollTop = 0;
+      lyricLine = -1;
+    });
+  }
+
+  // Highlight the line being sung, a few times a second, and keep it centred.
+  let lyricLine = -1;
+  setInterval(() => {
+    if (!state.lyrics || state.view !== 'player') return;
+    const t = nowTrack();
+    const got = t[3] && lyricsCache.get(t[3]);
+    if (!got || !got.synced) return;
+    const now = (t[3] ? yt.player.time() : state.pos) + 0.25;
+    let k = -1;
+    for (let i = 0; i < got.lines.length && got.lines[i].t <= now; i++) k = i;
+    if (k === lyricLine) return;
+    lyricLine = k;
+    const nodes = refs.lyricsLines.children;
+    for (let i = 0; i < nodes.length; i++) {
+      nodes[i].classList.toggle('now', i === k);
+      nodes[i].classList.toggle('past', i < k);
+    }
+    const cur = nodes[Math.max(0, k)];
+    if (cur) refs.lyrics.scrollTop = cur.offsetTop - refs.lyrics.clientHeight / 2 + cur.offsetHeight / 2;
+  }, 250);
+
+  // ---------- search ----------
+  // Your library is searched as you type; YouTube Music on Enter (each
+  // YouTube search uses 1% of the API's daily quota).
+
+  const fold = (x) => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+  function libraryMatches(q) {
+    const words = fold(q).split(/\s+/).filter(Boolean);
+    if (!words.length) return [];
+    const out = [], seen = new Set();
+    DATA.forEach((pl, plId) => pl.tracks.forEach((t, idx) => {
+      if (out.length >= 60) return;
+      const hay = fold(t[0] + ' ' + t[1]);
+      if (!words.every((w) => hay.includes(w))) return;
+      const key = t[3] || plId + ':' + idx;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ plId, idx, track: t });
+    }));
+    return out;
+  }
+
+  async function searchYouTube(q) {
+    if (!q.trim() || !state.account) return;
+    setState({ search: { ...state.search, ytQ: q, loading: true, error: '', yt: null } });
+    try {
+      const yt_ = await yt.search(q);
+      if (state.search.ytQ === q) setState({ search: { ...state.search, yt: yt_, loading: false } });
+    } catch (e) {
+      if (state.search.ytQ === q) setState({ search: { ...state.search, loading: false, error: e.message } });
+    }
+  }
+
+  function resultRow(track, cover, from, play) {
+    const row = document.createElement('div');
+    row.className = 'result-row' + (playable(track) ? '' : ' blocked');
+    row.innerHTML = '<span class="r-cover"></span><span class="r-meta"><span class="r-title"></span><span class="r-artist"></span></span>' +
+      '<span class="r-from"></span><span class="r-time"></span>' +
+      '<span class="t-more" role="button" tabindex="0" aria-label="More" title="Play next / Add to queue">' + MORE_ICON + '</span>';
+    row.querySelector('.r-cover').style.background = cover;
+    row.querySelector('.r-title').textContent = track[0];
+    row.querySelector('.r-artist').textContent = track[1];
+    row.querySelector('.r-from').textContent = from;
+    row.querySelector('.r-time').textContent = fmt(track[2]);
+    row.addEventListener('click', (e) => {
+      const more = e.target.closest('.t-more');
+      if (more) { const r = more.getBoundingClientRect(); openMenu(r.left, r.bottom + 4, track, play); return; }
+      play();
+    });
+    row.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, track, play); });
+    return row;
+  }
+
+  function renderSearch() {
+    if (state.view !== 'search') return;
+    const sr = state.search;
+    const lib = libraryMatches(sr.q);
+    refs.searchLibrary.classList.toggle('hidden', !sr.q.trim());
+    rebuild(refs.searchLibraryRows, JSON.stringify([sr.q, lib.map((m) => [m.plId, m.idx]), DATA.length]), () => {
+      if (!lib.length) {
+        const n = document.createElement('div');
+        n.className = 'search-empty';
+        n.textContent = 'No songs in your playlists match.';
+        refs.searchLibraryRows.appendChild(n);
+      }
+      lib.forEach((m) => refs.searchLibraryRows.appendChild(
+        resultRow(m.track, artFor(m.plId, m.idx).coverBg, DATA[m.plId].name, () => actions.playTrack(m.plId, m.idx))));
+    });
+
+    refs.searchYtHint.textContent = !state.account ? 'Connect YouTube Music to search it'
+      : sr.loading ? 'Searching…'
+      : sr.error ? sr.error
+      : sr.q.trim() && sr.q !== sr.ytQ ? 'Press Enter to search YouTube Music'
+      : '';
+    rebuild(refs.searchYtRows, JSON.stringify([sr.ytQ, sr.yt && sr.yt.map((t) => t[3])]), () => {
+      if (sr.yt && !sr.yt.length) {
+        const n = document.createElement('div');
+        n.className = 'search-empty';
+        n.textContent = 'No music videos found.';
+        refs.searchYtRows.appendChild(n);
+      }
+      (sr.yt || []).forEach((t) => refs.searchYtRows.appendChild(
+        resultRow(t, trackArt(t, t[0].length).coverBg, 'YouTube Music', () => { playNow(t); setState({ view: 'player' }); })));
+    });
+  }
+
+  // ---------- song menu (right-click or ⋯) ----------
+
+  function openMenu(x, y, track, play) {
+    setState({ menu: { x, y, track, play } });
+  }
+
+  function renderMenu() {
+    const m = state.menu;
+    refs.songMenu.classList.toggle('hidden', !m);
+    if (!m) return;
+    rebuild(refs.songMenu, JSON.stringify([m.track, !!m.play]), () => {
+      const item = (text, run) => {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.addEventListener('click', () => { setState({ menu: null }); run(); });
+        refs.songMenu.appendChild(b);
+      };
+      if (m.play) item('Play', m.play);
+      item('Play next', () => enqueue(m.track, true));
+      item('Add to queue', () => enqueue(m.track, false));
+    });
+    // Keep it on screen.
+    const w = refs.songMenu.offsetWidth, h = refs.songMenu.offsetHeight;
+    refs.songMenu.style.left = Math.min(m.x, window.innerWidth - w - 8) + 'px';
+    refs.songMenu.style.top = Math.min(m.y, window.innerHeight - h - 8) + 'px';
   }
 
   function renderCompact(v) {
@@ -960,7 +1330,8 @@
         '<span class="num-cell"></span>' +
         '<span class="t-title"></span>' +
         '<span class="t-artist"></span>' +
-        '<span class="t-time"></span>';
+        '<span class="t-time"></span>' +
+        '<span class="t-more" role="button" tabindex="0" aria-label="More" title="Play next / Add to queue">' + MORE_ICON + '</span>';
       const numCell = row.querySelector('.num-cell');
       numCell.style.color = t.numColor;
       if (t.showNow) {
@@ -974,7 +1345,12 @@
       row.querySelector('.t-title').textContent = t.title;
       row.querySelector('.t-artist').textContent = t.artist;
       row.querySelector('.t-time').textContent = t.time;
-      row.addEventListener('click', () => actions.playTrack(state.openId, t.idx));
+      const track = DATA[state.openId].tracks[t.idx];
+      row.addEventListener('click', (e) => {
+        if (e.target.closest('.t-more')) { const r = e.target.closest('.t-more').getBoundingClientRect(); openMenu(r.left, r.bottom + 4, track); return; }
+        actions.playTrack(state.openId, t.idx);
+      });
+      row.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, track); });
       refs.listRows.appendChild(row);
     }));
   }
@@ -1042,7 +1418,7 @@
     refs.timeLabel.textContent = v.now.time;
     refs.seekFill.style.width = v.progressPct;
     refs.seekKnob.style.left = v.progressPct;
-    const duration = DATA[state.plId].tracks[state.idx][2];
+    const duration = nowTrack()[2];
     refs.seekTrack.onclick = (e) => actions.seekFromEvent(e, refs.seekTrack, duration);
 
     refs.btnPrev.onclick = actions.prev;
@@ -1071,7 +1447,7 @@
     refs.minibarArtist.textContent = v.now.artist;
     refs.minibarTime.textContent = v.posLabel + ' / ' + v.now.time;
     refs.minibarSeekFill.style.width = v.progressPct;
-    const duration = DATA[state.plId].tracks[state.idx][2];
+    const duration = nowTrack()[2];
     refs.minibarSeek.onclick = (e) => actions.seekFromEvent(e, refs.minibarSeek, duration);
     refs.miniPrev.onclick = actions.prev;
     refs.miniNext.onclick = actions.next;
@@ -1091,9 +1467,43 @@
   refs.spFade.addEventListener('input', () => actions.setFade(Number(refs.spFade.value)));
   refs.spXf.addEventListener('input', () => actions.setCrossfade(Number(refs.spXf.value)));
   refs.spPressing.addEventListener('click', actions.openCrateFromSettings);
+  refs.spSleep.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setSleep(b.dataset.v)));
 
   refs.btnQueue.addEventListener('click', () => actions.togglePanel('queue'));
+
+  // Search: typing filters your library live; Enter also searches YouTube Music.
+  let viewBeforeSearch = 'home';
+  refs.searchInput.addEventListener('input', () => {
+    const q = refs.searchInput.value;
+    if (state.view !== 'search' && q) viewBeforeSearch = state.view;
+    setState({ search: { ...state.search, q }, view: q ? 'search' : (state.view === 'search' ? viewBeforeSearch : state.view) });
+  });
+  refs.searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { setState({ view: 'search' }); searchYouTube(refs.searchInput.value.trim()); }
+    if (e.key === 'Escape') {
+      refs.searchInput.value = '';
+      refs.searchInput.blur();
+      setState({ search: { ...state.search, q: '' }, view: state.view === 'search' ? viewBeforeSearch : state.view });
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    const typing = /INPUT|TEXTAREA/.test((e.target && e.target.tagName) || '');
+    if ((e.ctrlKey && e.key.toLowerCase() === 'f') || (e.key === '/' && !typing)) {
+      e.preventDefault();
+      refs.searchInput.focus();
+      refs.searchInput.select();
+    }
+  });
   refs.playerDismiss.addEventListener('click', actions.goHome);
+  refs.playerLyrics.addEventListener('click', () => setPrefs({ lyrics: !state.lyrics }));
+
+  // The song menu closes on any click outside it, Escape, scrolling or resizing.
+  document.addEventListener('pointerdown', (e) => {
+    if (state.menu && !refs.songMenu.contains(e.target) && !e.target.closest('.t-more')) setState({ menu: null });
+  });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.menu) setState({ menu: null }); });
+  refs.scroller.addEventListener('scroll', () => { if (state.menu) setState({ menu: null }); });
+  window.addEventListener('resize', () => { if (state.menu) setState({ menu: null }); });
 
   // Click outside the open panel, Escape, or a resize closes it.
   document.addEventListener('pointerdown', (e) => {
@@ -1114,7 +1524,7 @@
   refs.compactPrev.addEventListener('click', () => actions.prev());
   refs.compactToggle.addEventListener('click', () => actions.toggle());
   refs.compactNext.addEventListener('click', () => actions.next());
-  refs.compactSeek.addEventListener('click', (e) => actions.seekFromEvent(e, refs.compactSeek, DATA[state.plId].tracks[state.idx][2]));
+  refs.compactSeek.addEventListener('click', (e) => actions.seekFromEvent(e, refs.compactSeek, nowTrack()[2]));
   // The strip has no title bar: drag it by its background. (A CSS drag region
   // would swallow the scroll-wheel volume, so the move is done by hand.)
   refs.compact.addEventListener('pointerdown', (e) => {
@@ -1171,15 +1581,19 @@
 
   // ---------- playback clock ----------
   setInterval(() => {
+    if (state.sleep && state.sleep.at) {
+      if (Date.now() >= state.sleep.at) { if (state.playing) sleepNow(); else setState({ sleep: null }); }
+      else if (state.panel === 'settings') render(); // keep the countdown fresh
+    }
     if (!state.playing) return;
-    const t = DATA[state.plId].tracks[state.idx];
+    const t = nowTrack();
     if (t[3]) {
       const s = Math.min(Math.floor(yt.player.time()), t[2]);
       if (s !== state.pos) setState({ pos: s });
       maybeCrossfade(t);
       return;
     }
-    if (state.pos + 1 >= t[2]) advance(); else setState({ pos: state.pos + 1 });
+    if (state.pos + 1 >= t[2]) songEnded(); else setState({ pos: state.pos + 1 });
   }, 1000);
 
   // ---------- keyboard: space toggles play/pause ----------
@@ -1191,7 +1605,7 @@
     }
   });
 
-  yt.onEnded(() => advance());
+  yt.onEnded(songEnded);
   yt.onError(onPlayError);
 
   // Headphone/media-key pauses reach the YouTube player directly; follow it.
@@ -1211,15 +1625,22 @@
   let mediaKey = '';
   function syncMediaSession() {
     if (!media || typeof MediaMetadata === 'undefined') return;
-    const t = DATA[state.plId].tracks[state.idx];
-    const key = state.plId + ':' + state.idx;
+    const t = nowTrack();
+    const key = state.qTrack ? 'q:' + state.qTrack[3] : state.plId + ':' + state.idx;
     if (key !== mediaKey) {
       mediaKey = key;
       const art = t[4] ? [{ src: t[4].url, sizes: '480x360', type: 'image/jpeg' }] : [];
       media.metadata = new MediaMetadata({ title: t[0], artist: t[1], album: DATA[state.plId].name, artwork: art });
     }
     media.playbackState = state.playing ? 'playing' : 'paused';
+    // The tray icon's tooltip and menu show the song too.
+    const trayKey = key + ':' + state.playing;
+    if (shell && shell.setNowPlaying && trayKey !== trayNow) {
+      trayNow = trayKey;
+      shell.setNowPlaying({ title: t[0], artist: t[1], playing: state.playing });
+    }
   }
+  let trayNow = '';
 
   buildOrder(state.plId, state.idx);
   applyVolume();
@@ -1227,6 +1648,64 @@
   fitStage();
   if (yt.signedIn()) syncYouTube();
   window.addEventListener('beforeunload', saveSpot);
+
+  // ---------- desktop settings (tray, startup, shortcuts, keep on top) ----------
+  let desk = null;
+  const KEYS_HELP = 'Ctrl+Alt+Space play/pause · Ctrl+Alt+← → previous/next · Ctrl+Alt+↑ ↓ volume';
+
+  function setSwitch(b, on) {
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-checked', String(on));
+  }
+
+  function renderDesktop() {
+    refs.spDesktop.classList.toggle('hidden', !desk);
+    refs.compactPin.classList.toggle('hidden', !desk);
+    if (!desk) return;
+    setSwitch(refs.spLogin, !!desk.openAtLogin);
+    refs.spLogin.closest('.sp-line').classList.toggle('disabled', !desk.canStartup);
+    refs.spLoginModeRow.classList.toggle('disabled', !desk.openAtLogin);
+    refs.spLoginMode.querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.v === 'tray') === !!desk.startInTray));
+    setSwitch(refs.spTrayClose, !!desk.closeToTray);
+    setSwitch(refs.spKeys, !!desk.shortcuts);
+    refs.spKeysHelp.textContent = '';
+    if (desk.shortcuts) {
+      refs.spKeysHelp.append(KEYS_HELP);
+      if (desk.shortcutErrors && desk.shortcutErrors.length) {
+        const w = document.createElement('span');
+        w.className = 'warn';
+        w.textContent = ' · Taken by another app: ' + desk.shortcutErrors.join(', ');
+        refs.spKeysHelp.append(w);
+      }
+    }
+    refs.compactPin.classList.toggle('on', !!desk.pinned);
+    refs.compactPin.setAttribute('aria-pressed', String(!!desk.pinned));
+    refs.compactPin.title = desk.pinned ? 'Keep on top: on' : 'Keep on top';
+    refs.compactPin.setAttribute('aria-label', refs.compactPin.title);
+  }
+
+  function changeDesktop(patch) {
+    shell.settings(patch).then((s) => { desk = s; renderDesktop(); });
+  }
+
+  if (shell && shell.settings) {
+    shell.settings().then((s) => { desk = s; renderDesktop(); });
+    refs.spLogin.addEventListener('click', () => changeDesktop({ openAtLogin: !desk.openAtLogin }));
+    refs.spLoginMode.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => changeDesktop({ startInTray: b.dataset.v === 'tray' })));
+    refs.spTrayClose.addEventListener('click', () => changeDesktop({ closeToTray: !desk.closeToTray }));
+    refs.spKeys.addEventListener('click', () => changeDesktop({ shortcuts: !desk.shortcuts }));
+    refs.compactPin.addEventListener('click', () => changeDesktop({ pinned: !desk.pinned }));
+    // Global shortcuts and the tray menu.
+    shell.onCommand((cmd) => {
+      if (cmd === 'toggle') actions.toggle();
+      else if (cmd === 'next') actions.next();
+      else if (cmd === 'prev') actions.prev();
+      else if (cmd === 'volup' || cmd === 'voldown') {
+        actions.nudgeVolume(cmd === 'volup' ? 5 : -5);
+        notify('Volume ' + (state.muted ? 0 : state.volume));
+      }
+    });
+  }
 
   // ---------- updates (desktop app only) ----------
   let update = null;

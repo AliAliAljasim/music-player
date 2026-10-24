@@ -1,7 +1,7 @@
 {
   "name": "b-side",
   "productName": "b·side",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "b·side music player",
   "author": "AliAliAljasim",
   "private": true,
@@ -23,7 +23,8 @@
       "config.js",
       "style.css",
       "package.json",
-      "build/icon.ico"
+      "build/icon.ico",
+      "build/icon.png"
     ],
     "directories": {
       "output": "dist"

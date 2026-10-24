@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('bsideShell', {
   dragStart: () => ipcRenderer.send('bside:drag-start'),
   dragMove: (dx, dy) => ipcRenderer.send('bside:drag-move', dx, dy),
   onMaximizedChange: (fn) => ipcRenderer.on('bside:maximized', (e, on) => fn(!!on)),
+  settings: (patch) => ipcRenderer.invoke('bside:settings', patch || null),
+  onCommand: (fn) => ipcRenderer.on('bside:command', (e, cmd) => fn(cmd)),
+  setNowPlaying: (info) => ipcRenderer.send('bside:now-playing', info),
   updates: {
     status: () => ipcRenderer.invoke('bside:update', 'status'),
     check: () => ipcRenderer.invoke('bside:update', 'check'),
