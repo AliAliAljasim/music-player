@@ -1,5 +1,5 @@
 "use strict";
-// Electron shell for b·side. The page has to load from http://localhost:8000:
+// Electron shell for Groove. The page has to load from http://localhost:8000:
 // that is the origin registered with Google OAuth, and the YouTube player
 // refuses to embed from file://. So the app serves its own files there.
 const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, screen, shell } = require('electron');
@@ -19,7 +19,7 @@ const FILES = {
 };
 
 // Google refuses sign-in from user agents that identify as Electron.
-const USER_AGENT = app.userAgentFallback.replace(/ (Electron|b-side)\/\S+/g, '');
+const USER_AGENT = app.userAgentFallback.replace(/ (Electron|Groove|b-side)\/\S+/g, '');
 
 function startServer() {
   return new Promise((resolve, reject) => {
@@ -204,17 +204,17 @@ function setupDesktop(win, ws) {
   } catch (e) { /* no tray on this system */ }
   let now = { title: '', artist: '', playing: false };
   const buildMenu = () => tray && tray.setContextMenu(Menu.buildFromTemplate([
-    { label: now.title ? (now.title + (now.artist ? ' — ' + now.artist : '')).slice(0, 60) : 'b·side', enabled: false },
+    { label: now.title ? (now.title + (now.artist ? ' — ' + now.artist : '')).slice(0, 60) : 'Groove', enabled: false },
     { type: 'separator' },
     { label: now.playing ? 'Pause' : 'Play', click: () => send('toggle') },
     { label: 'Next', click: () => send('next') },
     { label: 'Previous', click: () => send('prev') },
     { type: 'separator' },
-    { label: 'Show b·side', click: showWindow },
+    { label: 'Show Groove', click: showWindow },
     { label: 'Quit', click: () => { quitting = true; app.quit(); } }
   ]));
   if (tray) {
-    tray.setToolTip('b·side');
+    tray.setToolTip('Groove');
     buildMenu();
     tray.on('click', showWindow);
   }
@@ -222,7 +222,7 @@ function setupDesktop(win, ws) {
     if (e.sender !== win.webContents || !info) return;
     now = { title: String(info.title || ''), artist: String(info.artist || ''), playing: !!info.playing };
     if (!tray) return;
-    tray.setToolTip((now.title ? now.title + (now.artist ? ' — ' + now.artist : '') : 'b·side').slice(0, 127));
+    tray.setToolTip((now.title ? now.title + (now.artist ? ' — ' + now.artist : '') : 'Groove').slice(0, 127));
     buildMenu();
   });
 
@@ -351,8 +351,20 @@ function createWindow() {
   return win;
 }
 
+// The app was called b·side before 1.4.0, and its settings folder (sign-in,
+// preferences, saved song, window positions) still has that name. Keep using
+// it: renaming isn't reliable, since Electron's crash reporter has already
+// created (and on Windows holds open) the new folder by the time this runs.
+function keepOldUserData() {
+  const old = path.join(app.getPath('appData'), 'b·side');
+  const hasData = (dir) => fs.existsSync(path.join(dir, 'Local Storage')) || fs.existsSync(path.join(dir, 'window.json'));
+  if (!hasData(app.getPath('userData')) && hasData(old)) app.setPath('userData', old);
+}
+keepOldUserData();
+
 // Same id the installer gives the Start menu shortcut, so the running window
-// groups with a pinned taskbar icon.
+// groups with a pinned taskbar icon. (Kept from the b·side days: changing it
+// would make Windows treat Groove as a separate app.)
 app.setAppUserModelId('com.alialialjasim.bside');
 
 if (!app.requestSingleInstanceLock()) {
@@ -366,8 +378,8 @@ if (!app.requestSingleInstanceLock()) {
     try {
       await startServer();
     } catch (err) {
-      dialog.showErrorBox('b·side', err.code === 'EADDRINUSE'
-        ? `Port ${PORT} is already in use. Close whatever is using it (another b·side, or a dev server) and try again.`
+      dialog.showErrorBox('Groove', err.code === 'EADDRINUSE'
+        ? `Port ${PORT} is already in use. Close whatever is using it (another Groove, or a dev server) and try again.`
         : String(err));
       return app.quit();
     }

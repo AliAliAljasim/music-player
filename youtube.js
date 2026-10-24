@@ -1,5 +1,5 @@
 "use strict";
-// YouTube sign-in, library import and playback for b·side.
+// YouTube sign-in, library import and playback for Groove.
 // Google Identity Services issues a youtube.readonly token, the YouTube
 // Data API v3 supplies playlists, and the IFrame Player API plays them.
 window.BSideYouTube = (() => {

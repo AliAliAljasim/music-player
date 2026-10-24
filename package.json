@@ -1,8 +1,8 @@
 {
   "name": "b-side",
-  "productName": "b·side",
-  "version": "1.3.0",
-  "description": "b·side music player",
+  "productName": "Groove",
+  "version": "1.4.0",
+  "description": "Groove music player",
   "author": "AliAliAljasim",
   "private": true,
   "main": "main.js",
@@ -13,7 +13,7 @@
   },
   "build": {
     "appId": "com.alialialjasim.bside",
-    "productName": "b-side",
+    "productName": "Groove",
     "files": [
       "main.js",
       "preload.js",
@@ -42,11 +42,11 @@
       "runAfterFinish": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "b·side",
-      "uninstallDisplayName": "b·side",
+      "shortcutName": "Groove",
+      "uninstallDisplayName": "Groove",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
-      "artifactName": "b-side-setup-${version}.${ext}"
+      "artifactName": "groove-setup-${version}.${ext}"
     },
     "publish": [
       {

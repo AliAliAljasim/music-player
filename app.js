@@ -1834,7 +1834,7 @@
   // ---------- updates (desktop app only) ----------
   let update = null;
   const UPDATE_VIEW = {
-    idle: () => ['b·side ' + update.version, 'Updates come from GitHub', 'Check for updates'],
+    idle: () => ['Groove ' + update.version, 'Updates come from GitHub', 'Check for updates'],
     latest: () => ['Up to date', '', 'Check for updates'],
     checking: () => ['Checking for updates…', '', null],
     available: (u) => ['Version ' + u.next + ' is available', 'Downloads while you listen', 'Update now'],
@@ -1850,7 +1850,7 @@
     if (!view) return;
     const [title, sub, button] = view(update);
     refs.spUpdateTitle.textContent = title;
-    refs.spUpdateSub.textContent = sub || 'b·side ' + update.version;
+    refs.spUpdateSub.textContent = sub || 'Groove ' + update.version;
     refs.spUpdateBtn.classList.toggle('hidden', !button);
     refs.spUpdateBtn.classList.toggle('accent', update.state === 'available' || update.state === 'ready');
     refs.spUpdateBtn.textContent = button || '';

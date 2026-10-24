@@ -20,5 +20,5 @@ rm -rf dist
 ./build-config.sh
 WINEDEBUG=-all npx electron-builder --win --x64 --publish never
 gh release create "v$version" \
-  "dist/b-side-setup-$version.exe" "dist/b-side-setup-$version.exe.blockmap" dist/latest.yml \
-  --target main --title "b·side $version" --notes "${NOTES:-b·side $version}"
+  "dist/groove-setup-$version.exe" "dist/groove-setup-$version.exe.blockmap" dist/latest.yml \
+  --target main --title "Groove $version" --notes "${NOTES:-Groove $version}"
