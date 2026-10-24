@@ -16,7 +16,8 @@ const FILES = {
   '/app.js': ['app.js', 'text/javascript'],
   '/youtube.js': ['youtube.js', 'text/javascript'],
   '/config.js': ['config.js', 'text/javascript'],
-  '/style.css': ['style.css', 'text/css']
+  '/style.css': ['style.css', 'text/css'],
+  '/menu.html': ['menu.html', 'text/html']
 };
 
 // Google refuses sign-in from user agents that identify as Electron.
@@ -272,25 +273,70 @@ function setupDesktop(win, ws, switchMode) {
     return settings();
   });
 
-  // Right-click on the mini strip: a native menu, since the 72px window has no
-  // room for one of its own.
+  // Right-click on the mini strip: a small menu window of its own (menu.html),
+  // since the 72px strip has no room for one and native menus can't hold
+  // sliders or be styled. It opens at the cursor and hides when it loses focus.
   const changed = () => { if (!win.isDestroyed()) win.webContents.send('bside:settings-changed', settings()); };
+  const MENU_W = 260;
+  let menuWin = null;
+  let menuState = null;
+  const menuFrom = (e) => menuWin && !menuWin.isDestroyed() && e.sender === menuWin.webContents;
+  const hideMenu = () => { if (menuWin && !menuWin.isDestroyed() && menuWin.isVisible()) menuWin.hide(); };
+  function placeMenu(height) {
+    const cursor = screen.getCursorScreenPoint();
+    const a = screen.getDisplayNearestPoint(cursor).workArea;
+    // Open above the cursor when there's no room below (the strip usually sits low).
+    const y = cursor.y + height > a.y + a.height ? cursor.y - height : cursor.y;
+    menuWin.setBounds({
+      x: Math.round(Math.min(Math.max(cursor.x, a.x), a.x + a.width - MENU_W)),
+      y: Math.round(Math.min(Math.max(y, a.y), a.y + a.height - height)),
+      width: MENU_W, height: Math.round(height)
+    });
+  }
   ipcMain.on('bside:strip-menu', (e, info) => {
     if (e.sender !== win.webContents || !info) return;
-    const vol = info.muted ? 0 : Math.round(info.volume);
-    const opacity = Math.round(opacityFor(ws, 'compact') * 100);
-    Menu.buildFromTemplate([
-      { label: 'Volume ' + vol + '%', enabled: false },
-      { label: 'Set volume', submenu: [100, 75, 50, 35, 25, 15, 10, 5].map((v) => ({ label: v + '%', type: 'radio', checked: vol === v, click: () => send({ type: 'volume', value: v }) })) },
-      { label: info.muted ? 'Unmute' : 'Mute', click: () => send({ type: 'mute' }) },
-      { type: 'separator' },
-      { label: 'Keep on top', type: 'checkbox', checked: !!ws.pinned, click: (item) => { ws.pinned = item.checked; win.setAlwaysOnTop(ws.mode === 'compact' && ws.pinned); saveWindowState(ws); changed(); } },
-      { label: 'Opacity', submenu: [100, 90, 80, 70, 60, 50, 40].map((p) => ({ label: p + '%', type: 'radio', checked: opacity === p, click: () => { ws.opacity = { ...(ws.opacity || {}), compact: p / 100 }; win.setOpacity(p / 100); saveWindowState(ws); changed(); } })) },
-      { type: 'separator' },
-      { label: 'Open full player', click: () => switchMode('full') },
-      { label: 'Close', click: () => win.close() }
-    ]).popup({ window: win });
+    menuState = { volume: Math.round(info.volume), muted: !!info.muted, pinned: !!ws.pinned, opacity: opacityFor(ws, 'compact') };
+    if (!menuWin || menuWin.isDestroyed()) {
+      menuWin = new BrowserWindow({
+        width: MENU_W, height: 300, show: false, frame: false, transparent: true, resizable: false, movable: false,
+        minimizable: false, maximizable: false, skipTaskbar: true, alwaysOnTop: true, hasShadow: false,
+        webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, 'menu-preload.js') }
+      });
+      menuWin.removeMenu();
+      menuWin.on('blur', hideMenu);
+      menuWin.loadURL(`http://localhost:${PORT}/menu.html`);
+      menuWin.webContents.once('did-finish-load', () => menuWin.webContents.send('menu:state', menuState));
+    } else {
+      menuWin.webContents.send('menu:state', menuState);
+    }
   });
+  // The menu reports its height once it has drawn the state: place and show it.
+  ipcMain.on('menu:size', (e, h) => {
+    if (!menuFrom(e) || typeof h !== 'number') return;
+    placeMenu(Math.min(600, Math.max(100, h)));
+    if (!menuWin.isVisible()) { menuWin.show(); menuWin.focus(); }
+  });
+  ipcMain.on('menu:volume', (e, v) => { if (menuFrom(e) && typeof v === 'number') send({ type: 'volume', value: Math.round(Math.min(100, Math.max(0, v))) }); });
+  ipcMain.on('menu:mute', (e) => { if (menuFrom(e)) send({ type: 'mute' }); });
+  ipcMain.on('menu:pin', (e, on) => {
+    if (!menuFrom(e)) return;
+    ws.pinned = !!on;
+    win.setAlwaysOnTop(ws.mode === 'compact' && ws.pinned);
+    menuWin.setAlwaysOnTop(true); // stay above the strip
+    saveWindowState(ws);
+    changed();
+  });
+  ipcMain.on('menu:opacity', (e, o) => {
+    if (!menuFrom(e) || typeof o !== 'number') return;
+    ws.opacity = { ...(ws.opacity || {}), compact: Math.min(1, Math.max(0.3, o)) };
+    if (ws.mode === 'compact') win.setOpacity(opacityFor(ws, 'compact'));
+    saveWindowState(ws);
+    changed();
+  });
+  ipcMain.on('menu:full', (e) => { if (menuFrom(e)) { hideMenu(); switchMode('full'); } });
+  ipcMain.on('menu:quit', (e) => { if (menuFrom(e)) { hideMenu(); win.close(); } });
+  ipcMain.on('menu:hide', (e) => { if (menuFrom(e)) hideMenu(); });
+  win.on('closed', () => { if (menuWin && !menuWin.isDestroyed()) menuWin.destroy(); });
 
   return { showWindow, startHidden: fromLogin && d.startInTray };
 }

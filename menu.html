@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Groove menu</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=DM+Mono:wght@400&display=swap">
+<style>
+  /* The mini player's right-click menu: a small window of its own, so it can
+     open beyond the 72px strip and hold sliders. Styled like the app. */
+  :root { --bg: #131211; --panel: #1A1816; --line: #2E2A26; --fg: #EEE8DF; --fg-2: #F6F1EA; --muted: #A39C92; --muted-2: #8F887E; --accent: #E0A458; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; overflow: hidden; user-select: none; }
+  body { padding: 8px; font-family: 'Instrument Sans', system-ui, sans-serif; color: var(--fg); font-size: 13px; }
+  .menu {
+    width: 244px; padding: 6px; border-radius: 12px; background: rgba(26,24,22,.98);
+    border: 1px solid var(--line); box-shadow: 0 10px 28px rgba(0,0,0,.55);
+  }
+  .group { padding: 4px 0; }
+  .group + .group { border-top: 1px solid #2A2724; }
+  .label { display: flex; justify-content: space-between; align-items: baseline; padding: 6px 10px 2px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted-2); }
+  .label .mono { font-family: 'DM Mono', monospace; font-size: 12px; letter-spacing: 0; text-transform: none; color: var(--fg); }
+  .slider-row { display: flex; align-items: center; gap: 8px; padding: 4px 10px 8px 6px; }
+  .icon-btn { width: 30px; height: 30px; flex-shrink: 0; border: 0; border-radius: 50%; background: none; color: var(--fg); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .icon-btn:hover { background: rgba(255,255,255,.08); }
+  .icon-btn svg { width: 17px; height: 17px; }
+  .slider-row.plain { padding-left: 10px; }
+  input[type="range"] { -webkit-appearance: none; appearance: none; flex: 1; height: 18px; margin: 0; background: transparent; cursor: pointer; }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--accent) 0 var(--fill, 50%), #3A3631 var(--fill, 50%) 100%);
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+    background: var(--fg-2); box-shadow: 0 1px 4px rgba(0,0,0,.5), 0 0 0 3px rgba(224,164,88,.25);
+  }
+  input[type="range"]:focus { outline: none; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between; width: 100%; height: 36px; padding: 0 10px;
+    border: 0; border-radius: 8px; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer;
+  }
+  .row:hover { background: rgba(255,255,255,.07); }
+  .row .hint { color: var(--muted-2); }
+  .row.danger:hover { background: rgba(196,43,28,.18); color: #FFB4A8; }
+  .switch { position: relative; width: 34px; height: 19px; border-radius: 10px; background: #3A3631; transition: background .15s; flex-shrink: 0; }
+  .switch span { position: absolute; left: 2px; top: 2px; width: 15px; height: 15px; border-radius: 50%; background: var(--fg-2); transition: transform .15s; }
+  .switch.on { background: var(--accent); }
+  .switch.on span { transform: translateX(15px); }
+</style>
+</head>
+<body>
+<div class="menu" id="menu" role="menu">
+  <div class="group">
+    <div class="label"><span>Volume</span><span class="mono" id="vol-val"></span></div>
+    <div class="slider-row">
+      <button class="icon-btn" id="mute" aria-label="Mute"></button>
+      <input type="range" id="vol" min="0" max="100" step="1" aria-label="Volume">
+    </div>
+  </div>
+  <div class="group">
+    <button class="row" id="pin" role="menuitemcheckbox"><span>Keep on top</span><span class="switch" id="pin-switch"><span></span></span></button>
+    <div class="label"><span>Opacity</span><span class="mono" id="op-val"></span></div>
+    <div class="slider-row plain">
+      <input type="range" id="op" min="40" max="100" step="5" aria-label="Opacity">
+    </div>
+  </div>
+  <div class="group">
+    <button class="row" id="full" role="menuitem"><span>Open full player</span></button>
+    <button class="row danger" id="quit" role="menuitem"><span>Close Groove</span></button>
+  </div>
+</div>
+<script>
+  "use strict";
+  const api = window.grooveMenu;
+  const $ = (id) => document.getElementById(id);
+  const LINE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z" fill="currentColor"></path>';
+  const ICONS = {
+    high: LINE + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path></svg>',
+    low: LINE + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>',
+    mute: LINE + '<path d="M23 9l-6 6"></path><path d="M17 9l6 6"></path></svg>'
+  };
+  let s = { volume: 50, muted: false, pinned: false, opacity: 1 };
+
+  function fill(input) {
+    const pct = (input.value - input.min) / (input.max - input.min) * 100;
+    input.style.setProperty('--fill', pct + '%');
+  }
+
+  function render() {
+    const vol = s.muted ? 0 : s.volume;
+    $('vol').value = vol; fill($('vol'));
+    $('vol-val').textContent = s.muted ? 'Muted' : vol + '%';
+    $('mute').innerHTML = ICONS[vol === 0 ? 'mute' : vol < 50 ? 'low' : 'high'];
+    $('mute').setAttribute('aria-label', s.muted ? 'Unmute' : 'Mute');
+    $('pin-switch').classList.toggle('on', s.pinned);
+    $('pin').setAttribute('aria-checked', String(s.pinned));
+    $('op').value = Math.round(s.opacity * 100); fill($('op'));
+    $('op-val').textContent = Math.round(s.opacity * 100) + '%';
+  }
+
+  api.onState((state) => { s = state; render(); api.size(document.body.scrollHeight); });
+  $('vol').addEventListener('input', () => { s.volume = +$('vol').value; s.muted = false; render(); api.volume(s.volume); });
+  $('mute').addEventListener('click', () => { s.muted = !s.muted; if (!s.muted && s.volume === 0) s.volume = 50; render(); api.mute(); });
+  $('pin').addEventListener('click', () => { s.pinned = !s.pinned; render(); api.pin(s.pinned); });
+  $('op').addEventListener('input', () => { s.opacity = +$('op').value / 100; render(); api.opacity(s.opacity); });
+  $('full').addEventListener('click', () => api.full());
+  $('quit').addEventListener('click', () => api.quit());
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') api.hide(); });
+  window.addEventListener('wheel', (e) => {
+    s.volume = Math.max(0, Math.min(100, (s.muted ? 0 : s.volume) + (e.deltaY < 0 ? 5 : -5))); s.muted = false; render(); api.volume(s.volume);
+  });
+</script>
+</body>
+</html>
