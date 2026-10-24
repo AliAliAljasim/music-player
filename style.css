@@ -546,6 +546,8 @@ button {
   .compact {
     position: relative; display: flex; align-items: center; gap: 4px; height: 100vh; padding: 0 8px 0 10px;
     background: var(--panel); user-select: none;
+    /* Windows 11 rounds the window's corners by 8px; the border follows them. */
+    border-radius: 8px; overflow: hidden;
     box-shadow: inset 0 0 0 1px #2E2A26;
   }
   .frameless .compact { cursor: grab; }
