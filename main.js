@@ -5,6 +5,7 @@
 const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, screen, shell, webFrameMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const http = require('http');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -335,6 +336,47 @@ function setupOutputGain(win) {
   });
 }
 
+// ---------- Windows volume mixer ----------
+// volume-helper.exe (scripts/volume-helper.cs) keeps Groove's mixer entries
+// and the in-app slider in step. Groove's audio comes from several of its
+// processes, so the helper is told their ids; it reports changes made in the
+// mixer as "vol <0..1> <mute>".
+
+function setupMixer(win) {
+  const exe = path.join(process.resourcesPath || '', 'volume-helper.exe');
+  if (process.platform !== 'win32' || !app.isPackaged || !fs.existsSync(exe)) return null;
+  let helper = null;
+  let last = null; // the app's latest level, re-sent if the helper restarts
+  const sendPids = () => helper && helper.stdin.write('pids ' + app.getAppMetrics().map((m) => m.pid).join(',') + '\n');
+  const start = () => {
+    helper = spawn(exe, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+    let buf = '';
+    helper.stdout.on('data', (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const [kind, level, mute] = buf.slice(0, i).trim().split(' ');
+        buf = buf.slice(i + 1);
+        if (kind === 'vol' && !win.isDestroyed()) win.webContents.send('bside:mixer', { level: Number(level), muted: mute === '1' });
+      }
+    });
+    helper.on('exit', () => { helper = null; if (!quitting) setTimeout(start, 2000); });
+    helper.stdin.on('error', () => {});
+    sendPids();
+    if (last) helper.stdin.write(last);
+  };
+  start();
+  // New Chromium processes (e.g. the audio service starting) need to be included.
+  setInterval(sendPids, 4000);
+  ipcMain.on('bside:mixer-set', (e, level, muted) => {
+    if (e.sender !== win.webContents || typeof level !== 'number') return;
+    last = 'set ' + Math.min(1, Math.max(0, level)).toFixed(3) + ' ' + (muted ? 1 : 0) + '\n';
+    if (helper) helper.stdin.write(last);
+  });
+  app.on('will-quit', () => { if (helper) helper.stdin.end(); });
+  return true;
+}
+
 function createWindow() {
   const ws = loadWindowState();
   const win = new BrowserWindow({
@@ -420,6 +462,8 @@ function createWindow() {
   });
 
   setupOutputGain(win);
+  const mixer = setupMixer(win);
+  ipcMain.handle('bside:has-mixer', () => !!mixer);
 
   win.loadURL(`http://localhost:${PORT}/`);
   return win;

@@ -15,6 +15,17 @@ exports.default = async function afterPack(context) {
   const icon = path.join(context.packager.projectDir, 'build', 'icon.ico');
   const rcedit = path.join(context.packager.projectDir, 'node_modules', 'rcedit', 'bin', 'rcedit-x64.exe');
   const { version } = context.packager.appInfo;
+  // The volume-mixer helper (scripts/volume-helper.cs), compiled with the C#
+  // compiler that ships with Windows' .NET Framework.
+  const winDir = process.platform === 'win32' ? process.env.WINDIR : '/mnt/c/Windows';
+  const csc = path.join(winDir, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+  const helperSrc = path.join(context.packager.projectDir, 'scripts', 'volume-helper.cs');
+  const helperOut = path.join(context.appOutDir, 'resources', 'volume-helper.exe');
+  try {
+    execFileSync(csc, ['/nologo', '/optimize', '/target:exe', '/out:' + winPath(helperOut), winPath(helperSrc)], { stdio: 'inherit' });
+  } catch (err) {
+    throw new Error('Could not compile the volume helper with ' + csc + ': ' + err.message);
+  }
   try {
     execFileSync(rcedit, [
       winPath(exe),

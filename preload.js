@@ -15,6 +15,11 @@ contextBridge.exposeInMainWorld('bsideShell', {
   onCommand: (fn) => ipcRenderer.on('bside:command', (e, cmd) => fn(cmd)),
   setNowPlaying: (info) => ipcRenderer.send('bside:now-playing', info),
   setOutputGain: (g) => ipcRenderer.send('bside:gain', g),
+  mixer: {
+    available: () => ipcRenderer.invoke('bside:has-mixer'),
+    set: (level, muted) => ipcRenderer.send('bside:mixer-set', level, muted),
+    onChange: (fn) => ipcRenderer.on('bside:mixer', (e, v) => fn(v))
+  },
   showStripMenu: (info) => ipcRenderer.send('bside:strip-menu', info),
   onSettingsChanged: (fn) => ipcRenderer.on('bside:settings-changed', (e, s) => fn(s)),
   updates: {

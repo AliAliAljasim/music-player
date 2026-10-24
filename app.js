@@ -99,10 +99,19 @@
   const VOLUME_FLOOR_DB = -50;
   const volumeGain = (v) => (v <= 0 ? 0 : Math.pow(10, (VOLUME_FLOOR_DB * (1 - v / 100)) / 20));
 
-  function applyVolume() {
+  // In the installed app Groove's slider is also its Windows volume-mixer
+  // entry: the mixer shows the same number (it applies volume/100 itself),
+  // mute is shared, and the player makes up the rest of the curve.
+  let mixer = false;
+
+  function applyVolume(fromMixer) {
     const v = state.muted ? 0 : state.volume;
     const g = volumeGain(v);
-    if (shell && shell.setOutputGain) {
+    if (mixer) {
+      if (!fromMixer) shell.mixer.set(state.volume / 100, state.muted);
+      yt.setVolume(state.volume > 0 ? 100 : 0);
+      shell.setOutputGain(state.volume > 0 ? volumeGain(state.volume) / (state.volume / 100) : 0);
+    } else if (shell && shell.setOutputGain) {
       yt.setVolume(v > 0 ? 100 : 0);
       shell.setOutputGain(g);
     } else {
@@ -1853,6 +1862,16 @@
   }
 
   renderDesktop(); // hides the desktop-only settings until (unless) the shell answers
+  // Volume-mixer link: changes made in Windows' mixer move Groove's slider.
+  if (shell && shell.mixer) {
+    shell.mixer.available().then((ok) => { mixer = !!ok; applyVolume(); });
+    shell.mixer.onChange((m) => {
+      if (!mixer) return;
+      setPrefs({ volume: Math.round(m.level * 100), muted: m.muted });
+      applyVolume(true);
+    });
+  }
+
   if (shell && shell.settings) {
     shell.settings().then((s) => { desk = s; renderDesktop(); });
     refs.spLogin.addEventListener('click', () => changeDesktop({ openAtLogin: !desk.openAtLogin }));
