@@ -259,6 +259,21 @@ button {
   color: var(--muted-2); border-bottom: 1px solid var(--panel-line);
 }
 .list-rows { display: flex; flex-direction: column; padding-top: 6px; }
+.list-tools { display: flex; align-items: center; gap: 16px; margin-bottom: 14px; }
+.list-filter {
+  display: flex; align-items: center; gap: 8px; height: 34px; width: 260px; padding: 0 12px; border-radius: 17px;
+  background: rgba(255,255,255,.05); color: var(--muted-2); cursor: text;
+}
+.list-filter:focus-within { background: rgba(255,255,255,.09); color: var(--fg-2); }
+.list-filter input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--fg-2); font: inherit; font-size: 13px; }
+.list-filter input::-webkit-search-cancel-button { filter: invert(.7); cursor: pointer; }
+.list-sort-note { font-size: 13px; color: var(--muted-2); }
+.list-sort-note button { margin-left: 6px; color: var(--accent); font-size: 13px; }
+.col-sort { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; display: inline-flex; align-items: center; gap: 4px; }
+.col-sort:hover, .col-sort.on { color: var(--fg-2); }
+.col-sort.right { justify-content: flex-end; }
+.sort-arrow { font-size: 10px; color: var(--accent); }
+.list-empty { padding: 18px 16px; color: var(--muted-2); font-size: 14px; }
 .track-row {
   display: grid; grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.4fr) 64px 28px; gap: 16px;
   align-items: center; min-height: 52px; padding: 0 16px; border-radius: 6px; font-size: 15px; width: 100%;
@@ -405,6 +420,12 @@ button {
 .qp-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; padding: 0 8px; border-radius: 6px; }
 .qp-row.clickable { cursor: pointer; }
 .qp-row.clickable:hover { background: rgba(255,255,255,.06); }
+.qp-row.queued { padding-left: 2px; }
+.qp-grip { width: 14px; flex-shrink: 0; display: flex; justify-content: center; color: var(--muted-2); cursor: grab; opacity: .5; }
+.qp-row.queued:hover .qp-grip { opacity: 1; }
+.qp-row.dragging { opacity: .4; }
+.qp-row.drop-above { box-shadow: inset 0 2px 0 var(--accent); }
+.qp-row.drop-below { box-shadow: inset 0 -2px 0 var(--accent); }
 .qp-remove { width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--muted); }
 .qp-remove:hover { background: rgba(255,255,255,.1); color: var(--fg-2); }
 .qp-cover { width: 36px; height: 36px; border-radius: 3px; flex-shrink: 0; box-shadow: 0 2px 6px rgba(0,0,0,.3); }
@@ -552,6 +573,25 @@ button {
   position: absolute; left: 590px; top: 106px; width: 0; height: 0; transform-origin: 0 0;
   transition: transform 1.4s cubic-bezier(.45,0,.2,1), filter .6s ease;
 }
+/* Skipping lifts the arm off the record and swings it out a little; it then
+   settles back onto the new song's first groove. */
+.tonearm.lifted { transition: transform .45s cubic-bezier(.3,0,.2,1), filter .3s ease; }
+
+/* Speed switch on the deck, like the buttons on a real turntable. */
+.rpm-switch {
+  position: absolute; left: 536px; top: 420px; display: flex; gap: 6px; padding: 5px;
+  border-radius: 8px; background: linear-gradient(180deg, #2A2724, #1A1816);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 6px 14px rgba(0,0,0,.35);
+}
+.rpm-switch button {
+  display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 5px;
+  font-family: 'DM Mono', monospace; font-size: 11px; color: rgba(255,255,255,.55);
+  background: linear-gradient(180deg, #3A3631, #2A2724); box-shadow: 0 1px 0 rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08);
+}
+.rpm-switch button:hover { color: #FFFFFF; }
+.rpm-switch button.on { color: #FFFFFF; background: linear-gradient(180deg, #2A2724, #34302B); box-shadow: inset 0 1px 3px rgba(0,0,0,.6); }
+.rpm-led { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.18); transition: background .2s, box-shadow .2s; }
+.rpm-switch button.on .rpm-led { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .arm-wire { position: absolute; left: -4px; top: -36px; width: 8px; height: 36px; background: linear-gradient(90deg, #6E6962, #E9E4DC 45%, #A8A197 62%, #5E5953); }
 .arm-mid {
   position: absolute; left: -18px; top: -82px; width: 36px; height: 48px; border-radius: 6px;

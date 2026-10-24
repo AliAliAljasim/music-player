@@ -55,7 +55,7 @@
 
   // Playback preferences, remembered between visits. fade and crossfade are seconds (0 = off).
   const PREFS_KEY = 'bside.prefs';
-  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false };
+  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false, sortKey: '', sortDir: 1, rpm: 33 };
 
   function loadPrefs() {
     try {
@@ -70,7 +70,7 @@
     view: 'player', openId: 1, plId: 1, idx: 2, pos: 0,
     playing: false, pick: null, rpm: 33, zoom: 1,
     account: null, syncing: false, ytError: '', notice: '', panel: null, volumeHint: false,
-    qTrack: null, menu: null, sleep: null,
+    qTrack: null, menu: null, sleep: null, listFilter: '', armLift: false,
     search: { q: '', ytQ: '', yt: null, loading: false, error: '' },
     ...PREFS, ...loadPrefs()
   };
@@ -107,8 +107,23 @@
   let order = [];
   const blocked = new Set(); // video ids YouTube refused to play here
 
+  // A playlist's songs in display/play order: as listed, or sorted by the
+  // column you picked (title, artist or length; ties keep playlist order).
+  // Sorting is this app's view only; the playlist on YouTube is unchanged.
+  const fold = (x) => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const SORT_VALUE = { title: (t) => fold(t[0]), artist: (t) => fold(t[1]), time: (t) => t[2] };
+
+  function playlistOrder(plId) {
+    const tr = DATA[plId].tracks, idx = [...tr.keys()], val = SORT_VALUE[state.sortKey];
+    if (!val) return idx;
+    return idx.sort((a, b) => {
+      const x = val(tr[a]), y = val(tr[b]);
+      return (x < y ? -1 : x > y ? 1 : 0) * state.sortDir || a - b;
+    });
+  }
+
   function buildOrder(plId, first) {
-    order = [...Array(DATA[plId].tracks.length).keys()];
+    order = playlistOrder(plId);
     if (!state.shuffle) return;
     order.splice(first, 1);
     for (let i = order.length - 1; i > 0; i--) {
@@ -588,10 +603,16 @@
       countLabel: p.tracks.length + (p.tracks.length === 1 ? ' song' : ' songs'), lengthLabel: Math.round(total(p) / 60) + ' min'
     }));
 
-    const openTracks = DATA[s.openId].tracks.map((t, i) => {
+    // The open playlist in sort order, narrowed by the filter box.
+    const words = fold(s.listFilter).split(/\s+/).filter(Boolean);
+    const openTracks = playlistOrder(s.openId).filter((i) => {
+      const t = DATA[s.openId].tracks[i];
+      return !words.length || words.every((w) => fold(t[0] + ' ' + t[1]).includes(w));
+    }).map((i, k) => {
+      const t = DATA[s.openId].tracks[i];
       const isNow = !s.qTrack && s.openId === s.plId && i === s.idx;
       return {
-        idx: i, num: i + 1, title: t[0], artist: t[1], time: fmt(t[2]),
+        idx: i, num: k + 1, title: t[0], artist: t[1], time: fmt(t[2]),
         color: isNow ? accent : '#EEE8DF', numColor: isNow ? accent : '#8F887E',
         bg: isNow ? 'rgba(255,255,255,.03)' : '',
         showNow: isNow, blocked: isBlocked(s.openId, i)
@@ -628,8 +649,8 @@
       headerLine: s.view === 'player' ? 'rgba(255,255,255,.12)' : '#262320',
       playing: s.playing,
       spinState: s.playing ? 'running' : 'paused',
-      armAngle: (s.playing || s.pos > 0) ? (27.8 + 20.9 * Math.min(1, s.pos / cur[2])).toFixed(2) : -3,
-      armShadow: s.playing ? 'drop-shadow(3px 5px 2.5px rgba(0,0,0,.45))' : 'drop-shadow(10px 18px 7px rgba(0,0,0,.3))',
+      armAngle: s.armLift ? 14 : (s.playing || s.pos > 0) ? (27.8 + 20.9 * Math.min(1, s.pos / cur[2])).toFixed(2) : -3,
+      armShadow: s.playing && !s.armLift ? 'drop-shadow(3px 5px 2.5px rgba(0,0,0,.45))' : 'drop-shadow(10px 18px 7px rgba(0,0,0,.3))',
       stageZoom: s.zoom,
       spinDur: s.rpm === 45 ? '4.4s' : '6s',
       rpmLabel: s.rpm === 45 ? '45' : '33⅓',
@@ -645,14 +666,22 @@
     openPlayer: () => setState({ view: 'player' }),
     openCrate: () => setState({ view: 'crate' }),
     autoMatch: () => setState({ pick: null }),
-    playOpen: () => play(state.openId, state.shuffle ? Math.floor(Math.random() * DATA[state.openId].tracks.length) : 0),
+    playOpen: () => play(state.openId, state.shuffle ? Math.floor(Math.random() * DATA[state.openId].tracks.length) : playlistOrder(state.openId)[0]),
+    // Column headers: first click sorts ascending, second descending, third
+    // back to the playlist's own order. A playing playlist follows along.
+    sortBy: (key) => {
+      const same = state.sortKey === key;
+      const next = !same ? { sortKey: key, sortDir: 1 } : state.sortDir === 1 ? { sortKey: key, sortDir: -1 } : { sortKey: '', sortDir: 1 };
+      setPrefs(next);
+      if (!state.shuffle) { buildOrder(state.plId, state.idx); render(); }
+    },
     toggle: () => { setState({ playing: !state.playing }); ytSync(); },
     next: () => step(1),
     prev: () => {
       if (!canGoBack()) return;
       if (state.pos > 3) { setState({ pos: 0 }); ytSync(0); } else step(-1);
     },
-    openPlaylist: (i) => setState({ view: 'list', openId: i }),
+    openPlaylist: (i) => { refs.listFilter.value = ''; setState({ view: 'list', openId: i, listFilter: '' }); },
     playTrack: (plId, idx, keepOrder) => play(plId, idx, keepOrder),
     toggleShuffle: () => {
       state.shuffle = !state.shuffle;
@@ -713,6 +742,7 @@
     playlistsGrid: el('playlists-grid'),
 
     listBack: el('list-back'), listDiscDot: el('list-disc-dot'), listDiscCover: el('list-disc-cover'),
+    listFilter: el('list-filter'), listSortNote: el('list-sort-note'), listColumns: el('list-columns'),
     listTitle: el('list-title'), listSub: el('list-sub'), listPlayAll: el('list-play-all'), listRows: el('list-rows'),
 
     crateNowCover: el('crate-now-cover'), crateHex: el('crate-hex'), crateMatch: el('crate-match'),
@@ -728,7 +758,7 @@
     playerTitle: el('player-title'), playerArtist: el('player-artist'),
 
     disc: el('disc'), discLabel: el('disc-label'), discTitle: el('disc-title'), discArtist: el('disc-artist'), discRpm: el('disc-rpm'),
-    tonearm: el('tonearm'), stylusStripe: el('stylus-stripe'),
+    tonearm: el('tonearm'), rpmSwitch: el('rpm-switch'), stylusStripe: el('stylus-stripe'),
 
     posLabel: el('pos-label'), timeLabel: el('time-label'), seekTrack: el('seek-track'),
     seekFill: el('seek-fill'), seekKnob: el('seek-knob'),
@@ -830,7 +860,23 @@
 
   // ---------- render ----------
 
+  // When the song changes while playing, lift the tonearm for a moment.
+  const ARM_LIFT_MS = 650;
+  let armSong = '';
+  let armTimer = 0;
+  function liftArmOnSongChange() {
+    const t = nowTrack();
+    const key = (state.qTrack ? 'q' : state.plId + ':' + state.idx) + ':' + (t[3] || t[0]);
+    if (armSong && key !== armSong && state.playing) {
+      state.armLift = true;
+      clearTimeout(armTimer);
+      armTimer = setTimeout(() => setState({ armLift: false }), ARM_LIFT_MS);
+    }
+    armSong = key;
+  }
+
   function render() {
+    liftArmOnSongChange();
     const v = computeVals();
 
     document.body.style.setProperty('--accent', v.accent);
@@ -1003,6 +1049,7 @@
           b.appendChild(x);
         }
         if (opts.track) b.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, opts.track); });
+        if (opts.dragIndex != null) makeDraggable(b, opts.dragIndex);
         refs.qpList.appendChild(b);
       };
       label('Now playing');
@@ -1011,7 +1058,8 @@
         label('Next in queue', { text: 'Clear', run: () => { userQueue = []; render(); } });
         userQueue.forEach((t, k) => row(t, trackArt(t, t[0].length).coverBg, {
           play: () => { userQueue.splice(k, 1); playNow(t); },
-          remove: () => { userQueue.splice(k, 1); render(); }
+          remove: () => { userQueue.splice(k, 1); render(); },
+          dragIndex: k
         }));
       }
       label('Next from ' + DATA[state.plId].name);
@@ -1156,8 +1204,6 @@
   // Your library is searched as you type; YouTube Music on Enter (each
   // YouTube search uses 1% of the API's daily quota).
 
-  const fold = (x) => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-
   function libraryMatches(q) {
     const words = fold(q).split(/\s+/).filter(Boolean);
     if (!words.length) return [];
@@ -1235,6 +1281,47 @@
       }
       (sr.yt || []).forEach((t) => refs.searchYtRows.appendChild(
         resultRow(t, trackArt(t, t[0].length).coverBg, 'YouTube Music', () => { playNow(t); setState({ view: 'player' }); })));
+    });
+  }
+
+  // Drag queued songs by their grip to reorder them: drop on the top half of
+  // a row to go above it, the bottom half to go below.
+  let dragFrom = -1;
+
+  function makeDraggable(row, k) {
+    const grip = document.createElement('span');
+    grip.className = 'qp-grip';
+    grip.title = 'Drag to reorder';
+    grip.innerHTML = '<svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="2.5" cy="3" r="1.4"></circle><circle cx="7.5" cy="3" r="1.4"></circle><circle cx="2.5" cy="8" r="1.4"></circle><circle cx="7.5" cy="8" r="1.4"></circle><circle cx="2.5" cy="13" r="1.4"></circle><circle cx="7.5" cy="13" r="1.4"></circle></svg>';
+    row.prepend(grip);
+    row.classList.add('queued');
+    row.draggable = true;
+    const below = (e) => e.clientY > row.getBoundingClientRect().top + row.offsetHeight / 2;
+    const clear = () => row.classList.remove('drop-above', 'drop-below');
+    row.addEventListener('dragstart', (e) => {
+      dragFrom = k;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(k));
+      row.classList.add('dragging');
+    });
+    row.addEventListener('dragend', () => { dragFrom = -1; row.classList.remove('dragging'); });
+    row.addEventListener('dragover', (e) => {
+      if (dragFrom < 0) return;
+      e.preventDefault();
+      row.classList.toggle('drop-below', below(e));
+      row.classList.toggle('drop-above', !below(e));
+    });
+    row.addEventListener('dragleave', clear);
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      clear();
+      if (dragFrom < 0) return;
+      let to = k + (below(e) ? 1 : 0);
+      const [t] = userQueue.splice(dragFrom, 1);
+      if (dragFrom < to) to--;
+      userQueue.splice(to, 0, t);
+      dragFrom = -1;
+      render();
     });
   }
 
@@ -1319,8 +1406,34 @@
     refs.listSub.textContent = v.openPl.countLabel + ' · ' + v.openPl.lengthLabel;
     refs.listPlayAll.onclick = actions.playOpen;
 
+    refs.listColumns.querySelectorAll('.col-sort').forEach((b) => {
+      const on = state.sortKey === b.dataset.k;
+      b.classList.toggle('on', on);
+      b.querySelector('.sort-arrow').textContent = on ? (state.sortDir === 1 ? '▲' : '▼') : '';
+      b.title = on ? (state.sortDir === 1 ? 'Click to reverse' : 'Click for playlist order') : 'Sort by ' + b.dataset.k;
+    });
+    rebuild(refs.listSortNote, JSON.stringify([state.sortKey, state.sortDir, state.listFilter, v.openTracks.length]), () => {
+      const parts = [];
+      if (state.listFilter.trim()) parts.push(v.openTracks.length + ' of ' + DATA[state.openId].tracks.length + ' songs');
+      if (state.sortKey) parts.push('Sorted by ' + { title: 'title', artist: 'artist', time: 'length' }[state.sortKey]);
+      refs.listSortNote.textContent = parts.join(' · ');
+      if (state.sortKey) {
+        const b = document.createElement('button');
+        b.textContent = 'Playlist order';
+        b.addEventListener('click', () => { setPrefs({ sortKey: '', sortDir: 1 }); if (!state.shuffle) { buildOrder(state.plId, state.idx); render(); } });
+        refs.listSortNote.appendChild(b);
+      }
+    });
+
     const rowsKey = JSON.stringify([state.openId, v.openTracks, v.art.vinylBg, v.spinState]);
-    rebuild(refs.listRows, rowsKey, () => v.openTracks.forEach((t) => {
+    rebuild(refs.listRows, rowsKey, () => {
+      if (!v.openTracks.length) {
+        const n = document.createElement('div');
+        n.className = 'list-empty';
+        n.textContent = 'No songs match.';
+        refs.listRows.appendChild(n);
+      }
+      v.openTracks.forEach((t) => {
       const row = document.createElement('button');
       row.className = 'track-row' + (t.blocked ? ' blocked' : '');
       if (t.blocked) row.title = "This song can't be played here";
@@ -1352,7 +1465,8 @@
       });
       row.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, track); });
       refs.listRows.appendChild(row);
-    }));
+      });
+    });
   }
 
   function renderCrate(v) {
@@ -1408,7 +1522,13 @@
     refs.discArtist.textContent = v.now.artist;
     refs.discRpm.textContent = v.rpmLabel + ' RPM';
 
+    refs.tonearm.classList.toggle('lifted', state.armLift);
     refs.tonearm.style.transform = 'rotate(' + v.armAngle + 'deg)';
+    refs.rpmSwitch.querySelectorAll('button').forEach((b) => {
+      const on = +b.dataset.rpm === state.rpm;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
     refs.tonearm.style.filter = v.armShadow;
     refs.stylusStripe.style.background = v.accent;
 
@@ -1470,6 +1590,9 @@
   refs.spSleep.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setSleep(b.dataset.v)));
 
   refs.btnQueue.addEventListener('click', () => actions.togglePanel('queue'));
+  refs.listColumns.querySelectorAll('.col-sort').forEach((b) => b.addEventListener('click', () => actions.sortBy(b.dataset.k)));
+  refs.listFilter.addEventListener('input', () => setState({ listFilter: refs.listFilter.value }));
+  refs.listFilter.addEventListener('keydown', (e) => { if (e.key === 'Escape') { refs.listFilter.value = ''; setState({ listFilter: '' }); refs.listFilter.blur(); } });
 
   // Search: typing filters your library live; Enter also searches YouTube Music.
   let viewBeforeSearch = 'home';
@@ -1495,6 +1618,7 @@
     }
   });
   refs.playerDismiss.addEventListener('click', actions.goHome);
+  refs.rpmSwitch.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => setPrefs({ rpm: +b.dataset.rpm })));
   refs.playerLyrics.addEventListener('click', () => setPrefs({ lyrics: !state.lyrics }));
 
   // The song menu closes on any click outside it, Escape, scrolling or resizing.
@@ -1613,7 +1737,28 @@
 
   // ---------- Windows media controls ----------
   // Song info for the Windows media overlay, and media keys / headphone
-  // buttons routed through the app so its state stays in step.
+  // buttons (play, pause, next, previous) routed through the app.
+  //
+  // Windows sends those buttons to the page's media session, and Chromium
+  // gives that to the frame that is playing sound. Without sound of its own
+  // the app loses to the hidden YouTube player, which ignores next/previous.
+  // So while music plays the app also plays a silent loop, which makes its
+  // own handlers below the ones that get the buttons.
+  const keepalive = new Audio(silentWav());
+  keepalive.loop = true;
+
+  function silentWav() {
+    const rate = 8000, n = rate; // one second of 8-bit mono silence
+    const b = new DataView(new ArrayBuffer(44 + n));
+    const str = (o, x) => [...x].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0)));
+    str(0, 'RIFF'); b.setUint32(4, 36 + n, true); str(8, 'WAVEfmt ');
+    b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
+    b.setUint32(24, rate, true); b.setUint32(28, rate, true); b.setUint16(32, 1, true); b.setUint16(34, 8, true);
+    str(36, 'data'); b.setUint32(40, n, true);
+    for (let i = 0; i < n; i++) b.setUint8(44 + i, 128);
+    return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+  }
+
   const media = navigator.mediaSession;
   if (media) {
     const on = (action, fn) => { try { media.setActionHandler(action, fn); } catch (e) { /* unsupported action */ } };
@@ -1633,6 +1778,8 @@
       media.metadata = new MediaMetadata({ title: t[0], artist: t[1], album: DATA[state.plId].name, artwork: art });
     }
     media.playbackState = state.playing ? 'playing' : 'paused';
+    if (state.playing && keepalive.paused) keepalive.play().catch(() => {});
+    else if (!state.playing && !keepalive.paused) keepalive.pause();
     // The tray icon's tooltip and menu show the song too.
     const trayKey = key + ':' + state.playing;
     if (shell && shell.setNowPlaying && trayKey !== trayNow) {

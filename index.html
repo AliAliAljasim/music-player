@@ -104,8 +104,19 @@
         Play all
       </button>
     </div>
-    <div class="list-columns">
-      <span>#</span><span>Title</span><span>Artist</span><span class="right">Time</span><span></span>
+    <div class="list-tools">
+      <label class="list-filter">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16l4.5 4.5"></path></svg>
+        <input type="search" id="list-filter" placeholder="Filter this playlist" aria-label="Filter this playlist" autocomplete="off" spellcheck="false">
+      </label>
+      <span class="list-sort-note" id="list-sort-note"></span>
+    </div>
+    <div class="list-columns" id="list-columns">
+      <span>#</span>
+      <button class="col-sort" data-k="title">Title<span class="sort-arrow"></span></button>
+      <button class="col-sort" data-k="artist">Artist<span class="sort-arrow"></span></button>
+      <button class="col-sort right" data-k="time"><span class="sort-arrow"></span>Time</button>
+      <span></span>
     </div>
     <div class="list-rows" id="list-rows"></div>
   </main>
@@ -175,6 +186,10 @@
             <div class="headshell-base"></div>
             <div class="headshell-ring"></div>
             <div class="pivot-foot"></div>
+            <div class="rpm-switch" id="rpm-switch" role="group" aria-label="Turntable speed">
+              <button data-rpm="33" aria-label="33 and a third RPM"><span class="rpm-led"></span>33⅓</button>
+              <button data-rpm="45" aria-label="45 RPM"><span class="rpm-led"></span>45</button>
+            </div>
             <div class="tonearm" id="tonearm">
               <div class="arm-wire"></div>
               <div class="arm-mid"></div>
