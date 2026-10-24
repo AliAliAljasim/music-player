@@ -52,10 +52,25 @@
 
   // ---------- state ----------
   // Player.dc.html imports Main with start-view="player": land on the turntable.
+
+  // Playback preferences, remembered between visits. fade and crossfade are seconds (0 = off).
+  const PREFS_KEY = 'bside.prefs';
+  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0 };
+
+  function loadPrefs() {
+    try {
+      const p = JSON.parse(localStorage.getItem(PREFS_KEY)) || {};
+      return Object.fromEntries(Object.keys(PREFS).filter((k) => typeof p[k] === typeof PREFS[k]).map((k) => [k, p[k]]));
+    } catch (e) {
+      return {}; // storage unavailable: defaults
+    }
+  }
+
   const state = {
     view: 'player', openId: 1, plId: 1, idx: 2, pos: 0,
     playing: false, pick: null, rpm: 33, zoom: 1,
-    account: null, syncing: false, ytError: ''
+    account: null, syncing: false, ytError: '', notice: '', panel: null, volumeHint: false,
+    ...PREFS, ...loadPrefs()
   };
 
   const yt = window.BSideYouTube;
@@ -67,6 +82,67 @@
     render();
   }
 
+  function setPrefs(patch) {
+    setState(patch);
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(Object.fromEntries(Object.keys(PREFS).map((k) => [k, state[k]]))));
+    } catch (e) { /* storage unavailable: settings last this session */ }
+  }
+
+  function applyVolume() { yt.setVolume(state.muted ? 0 : state.volume); }
+
+  let noticeTimer = 0;
+  function notify(text) {
+    clearTimeout(noticeTimer);
+    setState({ notice: text });
+    noticeTimer = setTimeout(() => setState({ notice: '' }), 6000);
+  }
+
+  // ---------- play order ----------
+  // `order` lists the current playlist's track indexes in the order they
+  // play: as listed, or shuffled with the starting track first.
+
+  let order = [];
+  const blocked = new Set(); // video ids YouTube refused to play here
+
+  function buildOrder(plId, first) {
+    order = [...Array(DATA[plId].tracks.length).keys()];
+    if (!state.shuffle) return;
+    order.splice(first, 1);
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    order.unshift(first);
+  }
+
+  function isBlocked(plId, i) {
+    const id = DATA[plId].tracks[i][3];
+    return !!id && blocked.has(id);
+  }
+
+  // Up to `count` playable tracks after (dir 1) or before (dir -1) the
+  // current one in play order; `wrap` carries on past the ends.
+  function walk(dir, count, wrap) {
+    const n = order.length, p = order.indexOf(state.idx), out = [];
+    for (let k = 1; k < n && out.length < count; k++) {
+      const q = p + dir * k;
+      if (!wrap && (q < 0 || q >= n)) break;
+      const j = order[((q % n) + n) % n];
+      if (!isBlocked(state.plId, j)) out.push(j);
+    }
+    return out;
+  }
+
+  // What plays when the current track finishes; null at the end of the playlist.
+  function nextAuto() {
+    const loops = !isBlocked(state.plId, state.idx);
+    if (state.repeat === 'one' && loops) return state.idx;
+    const [j] = walk(1, 1, state.repeat === 'all');
+    if (j != null) return j;
+    return state.repeat === 'all' && loops ? state.idx : null;
+  }
+
   // ---------- helpers (ported from the design's Component class) ----------
 
   function fmt(s) {
@@ -75,15 +151,33 @@
     return m + ':' + (r < 10 ? '0' : '') + r;
   }
 
+  // Manual next/previous: always wraps, whatever the repeat mode.
+  // Manual next/previous wrap around, except going back past the first song
+  // with shuffle off.
   function step(d) {
-    const n = DATA[state.plId].tracks.length;
-    setState({ idx: (state.idx + d + n) % n, pos: 0, pick: null });
-    ytSync();
+    const [j] = walk(d, 1, d > 0 || state.shuffle);
+    setState({ idx: j == null ? state.idx : j, pos: 0, pick: null });
+    ytSync(0);
   }
 
-  function play(plId, idx) {
+  // With shuffle off, previous stops at the first song: still a restart if
+  // it has played a few seconds, then greyed out.
+  function canGoBack() {
+    return state.shuffle || state.pos > 3 || walk(-1, 1, false).length > 0;
+  }
+
+  // The current track finished (or couldn't play): move on, or stop at the end.
+  function advance(j = nextAuto()) {
+    if (j == null) setState({ idx: order[0], pos: 0, playing: false, pick: null });
+    else setState({ idx: j, pos: 0, pick: null });
+    ytSync(0);
+  }
+
+  // keepOrder: jumping within the current queue (Up next) keeps the shuffle.
+  function play(plId, idx, keepOrder) {
+    if (plId !== state.plId || !keepOrder) buildOrder(plId, idx);
     setState({ plId, idx, pos: 0, playing: true, view: 'player', pick: null });
-    ytSync();
+    ytSync(0);
   }
 
   // ---------- YouTube ----------
@@ -91,33 +185,129 @@
   // Sample tracks have none, so the simulated clock keeps driving them.
 
   let ytLoaded = null;
+  const fadeMs = () => state.fade * 1000;
 
   function ytSync(seekTo) {
     const t = DATA[state.plId].tracks[state.idx];
     if (!t[3]) return;
     if (ytLoaded !== t[3]) {
       ytLoaded = t[3];
-      yt.player.load(t[3], state.pos, state.playing);
+      yt.player.load(t[3], state.pos, state.playing, fadeMs());
       render();
       return;
     }
-    if (seekTo != null) yt.player.seek(seekTo);
-    if (state.playing) yt.player.play(); else yt.player.pause();
+    // Same song: pause and resume are instant. Fades are for songs starting
+    // (including restarting from 0:00) and for skipping away.
+    if (state.playing) {
+      if (seekTo != null) yt.player.seek(seekTo);
+      yt.player.play(seekTo === 0 ? fadeMs() : 0);
+    } else {
+      yt.player.pause(0).then((paused) => { if (paused && seekTo != null) yt.player.seek(seekTo); });
+    }
   }
 
-  function useLibrary(lists) {
-    DATA.splice(0, DATA.length, ...lists.map((p, i) => ({ name: p.name, color: PL_COLORS[i % PL_COLORS.length], tracks: p.tracks })));
-    ytLoaded = null;
-    setState({ openId: 0, plId: 0, idx: 0, pos: 0, playing: false, pick: null });
+  // Swap in a library. `spot` (playlist id, video id, position) is the song to
+  // land on: the saved one at startup, the current one on a refresh. Without
+  // one, or if it's gone, start at the top of the first playlist.
+  function useLibrary(lists, spot) {
+    const wasLoaded = ytLoaded;
+    DATA.splice(0, DATA.length, ...lists.map((p, i) => ({ id: p.id, name: p.name, color: PL_COLORS[i % PL_COLORS.length], tracks: p.tracks, cover: p.cover })));
+    const plId = spot ? DATA.findIndex((p) => p.id && p.id === spot.pl) : -1;
+    const idx = plId >= 0 ? DATA[plId].tracks.findIndex((t) => t[3] && t[3] === spot.vid) : -1;
+    if (idx < 0) {
+      ytLoaded = null;
+      buildOrder(0, 0);
+      setState({ openId: 0, plId: 0, idx: 0, pos: 0, playing: false, pick: null });
+      return;
+    }
+    // A refresh mid-song finds the same video still on the player: leave it be.
+    const same = wasLoaded === DATA[plId].tracks[idx][3];
+    if (!same) ytLoaded = null;
+    const pos = Math.max(0, Math.min(Math.floor(spot.pos || 0), DATA[plId].tracks[idx][2] - 1));
+    buildOrder(plId, idx);
+    setState({ openId: plId, plId, idx, pick: null, ...(same ? {} : { pos, playing: !!spot.play }) });
+    if (!same) ytSync();
   }
 
+  // ---------- resume ----------
+  // The song and position are saved as you listen, so the next launch (or the
+  // restart after an update) picks up where you left off.
+
+  const RESUME_KEY = 'bside.resume';
+  let resumeJson = '';
+  let restarting = false; // set when restarting to update: keep playing afterwards
+
+  function currentSpot() {
+    const pl = DATA[state.plId], t = pl.tracks[state.idx];
+    return pl.id && t[3] ? { pl: pl.id, vid: t[3], pos: state.pos } : null;
+  }
+
+  function savedSpot() {
+    try { return JSON.parse(localStorage.getItem(RESUME_KEY)); } catch (e) { return null; }
+  }
+
+  // Only YouTube songs are saved; the sample playlists never overwrite them.
+  function saveSpot() {
+    const spot = currentSpot();
+    if (!spot) return;
+    const json = JSON.stringify({ ...spot, play: restarting && state.playing });
+    if (json === resumeJson) return;
+    resumeJson = json;
+    try { localStorage.setItem(RESUME_KEY, json); } catch (e) { /* storage unavailable */ }
+  }
+
+  // ---------- crossfade ----------
+  // Near the end of a YouTube track, start the next one on the second deck
+  // and blend the two over `crossfade` seconds.
+
+  let xfStarted = 0;
+
+  function maybeCrossfade(t) {
+    const xf = state.crossfade;
+    if (!xf || Date.now() - xfStarted < xf * 1000 + 3000) return;
+    const dur = yt.player.duration() || t[2];
+    if (dur < xf * 2 + 10 || dur - yt.player.time() > xf) return;
+    const j = nextAuto();
+    const next = j == null ? null : DATA[state.plId].tracks[j];
+    if (!next || !next[3]) return;
+    xfStarted = Date.now();
+    ytLoaded = next[3];
+    setState({ idx: j, pos: 0, pick: null });
+    yt.player.crossfade(next[3], xf * 1000);
+  }
+
+  // ---------- unplayable tracks ----------
+  // Some videos can't be embedded, or are gone. Remember them for this
+  // session and skip to the next playable track.
+
+  const PLAY_ERRORS = { 100: 'has been removed or made private', 101: "can't be played outside YouTube", 150: "can't be played outside YouTube" };
+
+  function onPlayError(code) {
+    const t = DATA[state.plId].tracks[state.idx];
+    if (!t[3]) return;
+    blocked.add(t[3]);
+    if (!state.playing) { render(); return; }
+    if (!walk(1, 1, true).length) {
+      setState({ playing: false });
+      notify('None of the songs in this playlist can be played here.');
+      return;
+    }
+    notify('Skipped “' + t[0] + '”: it ' + (PLAY_ERRORS[code] || "couldn't be played") + '.');
+    // Repeat-one doesn't apply to a track that can't play.
+    const [j] = walk(1, 1, state.repeat !== 'off');
+    advance(j == null ? null : j);
+  }
+
+  // First load (startup or a new sign-in) lands on the saved song; a refresh
+  // keeps whatever is playing.
   async function syncYouTube() {
+    const first = !state.account;
     setState({ syncing: true, ytError: '' });
     try {
       const [account, lists] = await Promise.all([yt.profile(), yt.library()]);
       yt.ensurePlayer();
-      if (lists.length) useLibrary(lists);
-      setState({ account, syncing: false, view: 'home', ytError: lists.length ? '' : 'No playlists or liked music found on this account.' });
+      if (lists.length) useLibrary(lists, first ? savedSpot() : currentSpot());
+      setState({ account, syncing: false, ...(first ? { view: 'home' } : {}), ytError: lists.length ? '' : 'No playlists or liked music found on this account.' });
     } catch (e) {
       setState({ syncing: false, account: yt.signedIn() ? state.account : null, ytError: e.message });
     }
@@ -261,6 +451,44 @@
     return { c1, c2, c3, c4, coverBg, hasThumb: !!thumb, vinylBg: vinylBg(vinyl), vinylDisc: vinylDisc(vinyl), vinylName: vinyl.name };
   }
 
+  // ---------- playlist covers ----------
+  // YouTube playlists use their own cover; ones without (Liked music) get a
+  // 2x2 mosaic of their first song covers, like YouTube Music's auto covers.
+  // The record behind the sleeve takes the cover's main colour. Sample
+  // playlists keep their flat colour and printed name.
+
+  function playlistArt(p) {
+    const thumbs = [];
+    const seen = new Set();
+    for (const t of p.tracks) {
+      if (thumbs.length === 4) break;
+      if (t[4] && !seen.has(t[4].url)) { seen.add(t[4].url); thumbs.push(t[4]); }
+    }
+    const tiles = p.cover ? [p.cover] : thumbs.length >= 4 ? thumbs : thumbs.slice(0, 1);
+    const tc = tiles.length ? thumbColor(tiles[0]) : null;
+    return { color: tc ? tc.main : p.color, tiles };
+  }
+
+  // Paint a sleeve: cover art tiles if there are any, otherwise the flat
+  // colour (and, on grid tiles, the printed name).
+  function paintSleeve(node, pl, nameNode) {
+    const key = JSON.stringify([pl.tiles, pl.color]);
+    if (node.dataset.key === key) return;
+    node.dataset.key = key;
+    node.classList.toggle('has-art', pl.tiles.length > 0);
+    node.classList.toggle('mosaic', pl.tiles.length === 4);
+    node.querySelectorAll('.sleeve-tile').forEach((n) => n.remove());
+    node.style.background = pl.tiles.length ? '#1A1816' : pl.color;
+    pl.tiles.forEach((t, i) => {
+      const tile = document.createElement('span');
+      tile.className = 'sleeve-tile';
+      if (pl.tiles.length === 4) { tile.style.left = (i % 2) * 50 + '%'; tile.style.top = (i >> 1) * 50 + '%'; }
+      tile.style.background = 'url(' + JSON.stringify(t.url) + ') center / ' + t.size + ' no-repeat';
+      node.appendChild(tile);
+    });
+    if (nameNode) nameNode.classList.toggle('hidden', pl.tiles.length > 0);
+  }
+
   // ---------- derived view-model ----------
 
   function computeVals() {
@@ -270,7 +498,7 @@
     const total = (pl) => pl.tracks.reduce((a, t) => a + t[2], 0);
 
     const playlists = DATA.map((p, i) => ({
-      idx: i, name: p.name, color: p.color,
+      idx: i, name: p.name, ...playlistArt(p),
       countLabel: p.tracks.length + (p.tracks.length === 1 ? ' song' : ' songs'), lengthLabel: Math.round(total(p) / 60) + ' min'
     }));
 
@@ -280,26 +508,19 @@
         idx: i, num: i + 1, title: t[0], artist: t[1], time: fmt(t[2]),
         color: isNow ? accent : '#EEE8DF', numColor: isNow ? accent : '#8F887E',
         bg: isNow ? 'rgba(255,255,255,.03)' : '',
-        showNow: isNow
+        showNow: isNow, blocked: isBlocked(s.openId, i)
       };
     });
 
     const tr = DATA[s.plId].tracks;
     const cur = tr[s.idx];
     const art = artFor(s.plId, s.idx, s.pick);
-    const auto = closestVinyl(art.c1);
-
-    const upNext = [1, 2].map((k) => {
-      const j = (s.idx + k) % tr.length;
-      return { idx: j, title: tr[j][0], artist: tr[j][1], time: fmt(tr[j][2]), cover: artFor(s.plId, j).coverBg };
-    });
-
-    const views = [['Library', 'home'], ['Crate', 'crate'], ['Turntable', 'player']];
+    const views = [['Library', 'home'], ['Now playing', 'player']];
     const navActive = s.view === 'list' ? 'home' : s.view;
 
     return {
-      accent, playlists, openTracks, upNext, art,
-      openPl: playlists[s.openId], nowPl: playlists[s.plId],
+      accent, playlists, openTracks, art,
+      openPl: playlists[s.openId],
       nav: views.map(([label, v]) => ({
         label, view: v,
         active: navActive === v,
@@ -320,17 +541,13 @@
       showBackdrop: s.view === 'player' && backdrop,
       showMini: s.view !== 'player',
       headerLine: s.view === 'player' ? 'rgba(255,255,255,.12)' : '#262320',
-      playing: s.playing, paused: !s.playing,
-      toggleLabel: s.playing ? 'Pause' : (s.pos > 0 ? 'Resume' : 'Play'),
+      playing: s.playing,
       spinState: s.playing ? 'running' : 'paused',
       armAngle: (s.playing || s.pos > 0) ? (27.8 + 20.9 * Math.min(1, s.pos / cur[2])).toFixed(2) : -3,
       armShadow: s.playing ? 'drop-shadow(3px 5px 2.5px rgba(0,0,0,.45))' : 'drop-shadow(10px 18px 7px rgba(0,0,0,.3))',
       stageZoom: s.zoom,
-      ledColor: s.playing ? accent : 'rgba(255,255,255,.35)', ledGlow: s.playing ? '0 0 8px ' + accent : 'none',
       spinDur: s.rpm === 45 ? '4.4s' : '6s',
       rpmLabel: s.rpm === 45 ? '45' : '33⅓',
-      stateLabel: s.playing ? 'Now spinning' : (s.pos > 0 ? 'Paused' : 'Stopped'),
-      stopOpacity: (s.playing || s.pos > 0) ? 1 : 0.45,
       posLabel: fmt(s.pos),
       progressPct: (s.pos / cur[2] * 100).toFixed(2) + '%'
     };
@@ -342,15 +559,52 @@
     goHome: () => setState({ view: 'home' }),
     openPlayer: () => setState({ view: 'player' }),
     openCrate: () => setState({ view: 'crate' }),
-    closePlayer: () => setState({ view: 'list', openId: state.plId }),
     autoMatch: () => setState({ pick: null }),
-    playOpen: () => play(state.openId, 0),
+    playOpen: () => play(state.openId, state.shuffle ? Math.floor(Math.random() * DATA[state.openId].tracks.length) : 0),
     toggle: () => { setState({ playing: !state.playing }); ytSync(); },
     next: () => step(1),
-    prev: () => { if (state.pos > 3) { setState({ pos: 0 }); ytSync(0); } else step(-1); },
-    stop: () => { setState({ playing: false, pos: 0 }); ytSync(0); },
+    prev: () => {
+      if (!canGoBack()) return;
+      if (state.pos > 3) { setState({ pos: 0 }); ytSync(0); } else step(-1);
+    },
     openPlaylist: (i) => setState({ view: 'list', openId: i }),
-    playTrack: (plId, idx) => play(plId, idx),
+    playTrack: (plId, idx, keepOrder) => play(plId, idx, keepOrder),
+    toggleShuffle: () => {
+      state.shuffle = !state.shuffle;
+      buildOrder(state.plId, state.idx);
+      setPrefs({});
+    },
+    setRepeat: (r) => setPrefs({ repeat: r }),
+    cycleRepeat: () => setPrefs({ repeat: { off: 'all', all: 'one' }[state.repeat] || 'off' }),
+    setVolume: (v) => { setPrefs({ volume: v, muted: false }); applyVolume(); },
+    toggleMute: () => {
+      if (state.muted || state.volume === 0) setPrefs({ muted: false, volume: state.volume || 50 });
+      else setPrefs({ muted: true });
+      applyVolume();
+    },
+    setFade: (s) => setPrefs({ fade: s }),
+    setCrossfade: (s) => setPrefs({ crossfade: s }),
+    // Scroll on the compact player: nudge the volume and show it briefly.
+    nudgeVolume: (d) => {
+      const v = Math.max(0, Math.min(100, (state.muted ? 0 : state.volume) + d));
+      actions.setVolume(v);
+      clearTimeout(volumeHintTimer);
+      setState({ volumeHint: true });
+      volumeHintTimer = setTimeout(() => setState({ volumeHint: false }), 1200);
+    },
+    // The queue and settings drop down under their buttons; one at a time.
+    togglePanel: (name) => {
+      if (state.panel === name) { setState({ panel: null }); return; }
+      const btn = name === 'queue' ? refs.btnQueue : refs.btnSettings;
+      const panel = name === 'queue' ? refs.queuePanel : refs.settingsPanel;
+      const r = btn.getBoundingClientRect();
+      panel.style.top = (r.bottom + 8) + 'px';
+      panel.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+      setState({ panel: name });
+    },
+    openCrateFromSettings: () => setState({ view: 'crate', panel: null }),
+    // Electron only: resize the window between the full app and the thin strip.
+    setCompact: (on) => { if (shell) shell.setCompact(on); },
     pickVinyl: (i, auto) => setState({ pick: VINYLS[i].name === auto.name ? null : i }),
     seekFromEvent: (e, el, duration) => {
       const r = el.getBoundingClientRect();
@@ -371,9 +625,6 @@
     topbarRight: el('topbar-right'),
     goHome: el('go-home'),
 
-    heroArt: el('hero-art'), heroVinyl: el('hero-vinyl'), heroVinylLabel: el('hero-vinyl-label'),
-    heroCover: el('hero-cover'), heroState: el('hero-state'), heroTitle: el('hero-title'), heroSub: el('hero-sub'),
-    heroToggle: el('hero-toggle'), heroOpen: el('hero-open'),
     playlistsGrid: el('playlists-grid'),
 
     listBack: el('list-back'), listDiscDot: el('list-disc-dot'), listDiscCover: el('list-disc-cover'),
@@ -389,18 +640,33 @@
 
     stage: el('stage'), stageInner: el('stage-inner'),
     playerCover: el('player-cover'), playerCoverTitle: el('player-cover-title'), playerCoverArtist: el('player-cover-artist'),
-    playerClose: el('player-close'), ledDot: el('led-dot'), playerStateLabel: el('player-state-label'),
     playerTitle: el('player-title'), playerArtist: el('player-artist'),
-    playerOpenCrate: el('player-open-crate'), pressingDot: el('pressing-dot'), pressingName: el('pressing-name'),
-    upNextRows: el('up-next-rows'),
 
     disc: el('disc'), discLabel: el('disc-label'), discTitle: el('disc-title'), discArtist: el('disc-artist'), discRpm: el('disc-rpm'),
     tonearm: el('tonearm'), stylusStripe: el('stylus-stripe'),
 
     posLabel: el('pos-label'), timeLabel: el('time-label'), seekTrack: el('seek-track'),
     seekFill: el('seek-fill'), seekKnob: el('seek-knob'),
-    btnStop: el('btn-stop'), btnPrev: el('btn-prev'), btnToggle: el('btn-toggle'), btnNext: el('btn-next'),
+    btnPrev: el('btn-prev'), btnToggle: el('btn-toggle'), btnNext: el('btn-next'),
+    btnShuffle: el('btn-shuffle'), btnRepeat: el('btn-repeat'),
+    btnCompact: el('btn-compact'), btnSettings: el('btn-settings'), btnQueue: el('btn-queue'),
+    queuePanel: el('queue-panel'), qpSource: el('qp-source'), qpList: el('qp-list'),
+    playerDismiss: el('player-dismiss'),
+    windowControls: el('window-controls'), winMin: el('win-min'), winMax: el('win-max'), winClose: el('win-close'),
 
+    settingsPanel: el('settings-panel'), spShuffle: el('sp-shuffle'), spRepeat: el('sp-repeat'),
+    spMute: el('sp-mute'), spVolume: el('sp-volume'), spVolumeVal: el('sp-volume-val'),
+    spFade: el('sp-fade'), spFadeVal: el('sp-fade-val'), spXf: el('sp-xf'), spXfVal: el('sp-xf-val'),
+    spPressing: el('sp-pressing'), spPressingDot: el('sp-pressing-dot'), spPressingName: el('sp-pressing-name'),
+    spAccount: el('sp-account'),
+    spApp: el('sp-app'), spUpdateTitle: el('sp-update-title'), spUpdateSub: el('sp-update-sub'),
+    spUpdateBtn: el('sp-update-btn'), spProgress: el('sp-progress'), spProgressFill: el('sp-progress-fill'),
+
+    compact: el('compact'), compactArt: el('compact-art'), compactTitle: el('compact-title'), compactArtist: el('compact-artist'),
+    compactPrev: el('compact-prev'), compactToggle: el('compact-toggle'), compactNext: el('compact-next'),
+    compactExpand: el('compact-expand'), compactClose: el('compact-close'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
+
+    splash: el('splash'), scroller: el('scroller'),
     viewHome: el('view-home'), viewList: el('view-list'), viewCrate: el('view-crate'), viewPlayer: el('view-player')
   };
 
@@ -408,10 +674,37 @@
   const PAUSE_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="#131211"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>';
   const PLAY_ICON_SM = '<svg width="16" height="16" viewBox="0 0 24 24" fill="#131211"><path d="M7 4.5v15l13-7.5z"></path></svg>';
   const PAUSE_ICON_SM = '<svg width="16" height="16" viewBox="0 0 24 24" fill="#131211"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>';
-  const PLAY_ICON_HERO = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#131211"><path d="M7 4.5v15l13-7.5z"></path></svg>';
-  const PAUSE_ICON_HERO = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#131211"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>';
   const ACCOUNT_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"></path></svg>';
   const PLAY_TRI_ROW = '<svg width="14" height="14" viewBox="0 0 24 24" fill="#EEE8DF"><path d="M7 4.5v15l13-7.5z"></path></svg>';
+  // Mode and volume icons take their size from CSS and their colour from the button.
+  const LINE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">';
+  const SHUFFLE_ICON = LINE_SVG + '<path d="M16 3h5v5"></path><path d="M4 20L21 3"></path><path d="M21 16v5h-5"></path><path d="M15 15l6 6"></path><path d="M4 4l5 5"></path></svg>';
+  const REPEAT_PATHS = '<path d="M17 1l4 4-4 4"></path><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><path d="M7 23l-4-4 4-4"></path><path d="M21 13v2a4 4 0 0 1-4 4H3"></path>';
+  const REPEAT_ICONS = {
+    off: LINE_SVG + REPEAT_PATHS + '</svg>',
+    all: LINE_SVG + REPEAT_PATHS + '</svg>',
+    one: LINE_SVG + REPEAT_PATHS + '<text x="12" y="14.5" text-anchor="middle" font-size="7.5" font-weight="700" font-family="DM Mono, monospace" fill="currentColor" stroke="none">1</text></svg>'
+  };
+  const REPEAT_LABELS = { off: 'Repeat: off', all: 'Repeat: playlist', one: 'Repeat: this song' };
+  const WIN_ICON = '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1">';
+  const MAXIMIZE_ICON = WIN_ICON + '<rect x="0.5" y="0.5" width="9" height="9"></rect></svg>';
+  const RESTORE_ICON = WIN_ICON + '<rect x="0.5" y="2.5" width="7" height="7"></rect><path d="M2.5 2.5v-2h7v7h-2"></path></svg>';
+  const SPEAKER = '<path d="M11 5L6 9H2v6h4l5 4V5z" fill="currentColor"></path>';
+  const VOLUME_ICONS = {
+    high: LINE_SVG + SPEAKER + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M19 5a10 10 0 0 1 0 14"></path></svg>',
+    low: LINE_SVG + SPEAKER + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path></svg>',
+    mute: LINE_SVG + SPEAKER + '<path d="M23 9l-6 6"></path><path d="M17 9l6 6"></path></svg>'
+  };
+
+  // Present in the Electron app (preload.js); absent in a plain browser.
+  const shell = window.bsideShell || null;
+  let volumeHintTimer = 0;
+
+  function setIcon(node, key, html) {
+    if (node.dataset.icon === key) return;
+    node.dataset.icon = key;
+    node.innerHTML = html;
+  }
 
   function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
@@ -422,6 +715,24 @@
     node.dataset.key = key;
     clear(node);
     build();
+  }
+
+  // ---------- startup screen ----------
+  // Stays up while the library loads (at least ~1s so it never just flashes,
+  // at most 8s), then swipes up.
+
+  const SPLASH_MIN_MS = 1100;
+  const SPLASH_MAX_MS = 8000;
+  let booted = false;
+  let splashDone = false;
+
+  function hideSplash(force) {
+    if (!booted || splashDone || (!force && state.syncing)) return;
+    splashDone = true;
+    setTimeout(() => {
+      refs.splash.classList.add('done');
+      setTimeout(() => refs.splash.remove(), 900);
+    }, Math.max(0, SPLASH_MIN_MS - performance.now()));
   }
 
   // ---------- render ----------
@@ -448,7 +759,9 @@
 
     renderAccount();
 
-    // view switching
+    // view switching (a new page starts at the top)
+    const pageKey = state.view + ':' + state.openId;
+    if (refs.scroller.dataset.page !== pageKey) { refs.scroller.dataset.page = pageKey; refs.scroller.scrollTop = 0; }
     refs.viewHome.classList.toggle('active', v.isHome);
     refs.viewList.classList.toggle('active', v.isList);
     refs.viewCrate.classList.toggle('active', v.isCrate);
@@ -459,26 +772,57 @@
     renderCrate(v);
     renderPlayer(v);
     renderMinibar(v);
+    const back = canGoBack();
+    [refs.btnPrev, refs.miniPrev, refs.compactPrev].forEach((b) => { b.disabled = !back; });
+    renderSettings(v);
+    renderQueue(v);
+    syncMediaSession();
+    saveSpot();
+    renderCompact(v);
+    hideSplash();
   }
 
-  function renderAccount() {
-    const key = JSON.stringify([state.account, state.syncing, state.ytError]);
-    rebuild(refs.topbarRight, key, () => {
+  function renderSettings(v) {
+    refs.settingsPanel.classList.toggle('hidden', state.panel !== 'settings');
+    refs.btnSettings.classList.toggle('on', state.panel === 'settings');
+    refs.btnSettings.setAttribute('aria-expanded', String(state.panel === 'settings'));
+
+    refs.spShuffle.classList.toggle('on', state.shuffle);
+    refs.spShuffle.setAttribute('aria-checked', String(state.shuffle));
+    refs.spRepeat.querySelectorAll('button').forEach((b) => {
+      const on = b.dataset.v === state.repeat;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+
+    const vol = state.muted ? 0 : state.volume;
+    const level = vol === 0 ? 'mute' : vol < 50 ? 'low' : 'high';
+    setIcon(refs.spMute, level, VOLUME_ICONS[level]);
+    refs.spMute.setAttribute('aria-label', vol === 0 ? 'Unmute' : 'Mute');
+    refs.spVolume.value = String(vol);
+    refs.spVolumeVal.textContent = String(vol);
+    refs.spFade.value = String(state.fade);
+    refs.spFadeVal.textContent = state.fade ? state.fade + ' s' : 'Off';
+    refs.spXf.value = String(state.crossfade);
+    refs.spXfVal.textContent = state.crossfade ? state.crossfade + ' s' : 'Off';
+
+    refs.spPressingDot.style.background = v.art.vinylBg;
+    refs.spPressingName.textContent = v.art.vinylName + (state.pick != null ? '' : ' · auto');
+
+    rebuild(refs.spAccount, JSON.stringify([state.account, state.syncing]), () => {
       const add = (tag, cls, text) => {
         const n = document.createElement(tag);
         if (cls) n.className = cls;
         if (text) n.textContent = text;
-        refs.topbarRight.appendChild(n);
+        refs.spAccount.appendChild(n);
         return n;
       };
-      if (state.ytError) add('span', 'yt-error', state.ytError);
       if (state.syncing) {
-        add('span', '', 'Syncing YouTube Music…');
+        add('span', 'muted', 'Syncing your library…');
       } else if (state.account) {
-        add('span', '', 'Synced with YouTube Music');
-        const av = add('button', 'avatar');
-        av.title = state.account.name + ' · Sign out';
-        av.setAttribute('aria-label', 'Sign out of ' + state.account.name);
+        const who = add('div', 'sp-account');
+        const av = document.createElement('span');
+        av.className = 'avatar';
         if (state.account.avatar) {
           const img = document.createElement('img');
           img.src = state.account.avatar;
@@ -488,28 +832,95 @@
         } else {
           av.innerHTML = ACCOUNT_ICON;
         }
-        av.onclick = disconnectYouTube;
+        const name = document.createElement('span');
+        name.className = 'sp-account-name';
+        name.textContent = state.account.name;
+        who.append(av, name);
+        const row = add('div', 'sp-buttons');
+        const refresh = document.createElement('button');
+        refresh.className = 'pill pill-ghost';
+        refresh.textContent = 'Refresh library';
+        refresh.onclick = syncYouTube;
+        const out = document.createElement('button');
+        out.className = 'pill pill-ghost';
+        out.textContent = 'Sign out';
+        out.onclick = disconnectYouTube;
+        row.append(refresh, out);
       } else {
         add('button', 'yt-connect', 'Connect YouTube Music').onclick = connectYouTube;
       }
     });
   }
 
+  // Now playing, then everything still to come in play order (shuffled order
+  // when shuffle is on; wraps around when repeating the playlist).
+  function renderQueue(v) {
+    refs.queuePanel.classList.toggle('hidden', state.panel !== 'queue');
+    refs.btnQueue.classList.toggle('on', state.panel === 'queue');
+    refs.btnQueue.setAttribute('aria-expanded', String(state.panel === 'queue'));
+    if (state.panel !== 'queue') return;
+
+    const tr = DATA[state.plId].tracks;
+    const upcoming = walk(1, tr.length, state.repeat !== 'off');
+    refs.qpSource.textContent = DATA[state.plId].name + (state.shuffle ? ' · shuffled' : '');
+    rebuild(refs.qpList, JSON.stringify([state.plId, state.idx, upcoming, v.art.coverBg]), () => {
+      const label = (text) => {
+        const n = document.createElement('span');
+        n.className = 'qp-label';
+        n.textContent = text;
+        refs.qpList.appendChild(n);
+      };
+      const row = (j, now) => {
+        const t = tr[j];
+        const b = document.createElement('button');
+        b.className = 'qp-row' + (now ? ' now' : '');
+        b.innerHTML = '<span class="qp-cover"></span><span class="qp-meta"><span class="qp-title"></span><span class="qp-artist"></span></span><span class="qp-time"></span>';
+        b.querySelector('.qp-cover').style.background = now ? v.art.coverBg : artFor(state.plId, j).coverBg;
+        b.querySelector('.qp-title').textContent = t[0];
+        b.querySelector('.qp-artist').textContent = t[1];
+        b.querySelector('.qp-time').textContent = fmt(t[2]);
+        if (!now) b.addEventListener('click', () => actions.playTrack(state.plId, j, true));
+        refs.qpList.appendChild(b);
+      };
+      label('Now playing');
+      row(state.idx, true);
+      label('Up next');
+      upcoming.forEach((j) => row(j, false));
+      if (!upcoming.length) {
+        const end = document.createElement('span');
+        end.className = 'qp-end';
+        end.textContent = 'Nothing after this song.';
+        refs.qpList.appendChild(end);
+      }
+    });
+  }
+
+  function renderCompact(v) {
+    refs.compactArt.style.background = v.art.coverBg;
+    refs.compactTitle.textContent = v.now.title;
+    refs.compactArtist.textContent = state.volumeHint ? 'Volume ' + (state.muted ? 0 : state.volume) : v.now.artist;
+    refs.compactSeekFill.style.width = v.progressPct;
+    refs.compactToggle.innerHTML = v.playing ? PAUSE_ICON_SM : PLAY_ICON_SM;
+  }
+
+  function renderAccount() {
+    const key = JSON.stringify([state.account, state.syncing, state.ytError, state.notice]);
+    rebuild(refs.topbarRight, key, () => {
+      const add = (tag, cls, text) => {
+        const n = document.createElement(tag);
+        if (cls) n.className = cls;
+        if (text) n.textContent = text;
+        refs.topbarRight.appendChild(n);
+        return n;
+      };
+      if (state.ytError) add('span', 'yt-error', state.ytError);
+      if (state.notice) add('span', 'yt-notice', state.notice);
+      if (state.syncing) add('span', '', 'Syncing YouTube Music…');
+      else if (!state.account) add('button', 'yt-connect', 'Connect YouTube Music').onclick = connectYouTube;
+    });
+  }
+
   function renderHome(v) {
-    refs.heroVinyl.style.background = v.art.vinylBg;
-    refs.heroVinyl.style.animationPlayState = v.spinState;
-    refs.heroVinylLabel.style.background = v.art.c4;
-    refs.heroCover.style.background = v.art.coverBg;
-    refs.heroState.textContent = v.stateLabel + ' · from ' + v.nowPl.name;
-    refs.heroState.style.color = v.accent;
-    refs.heroTitle.textContent = v.now.title;
-    refs.heroSub.textContent = v.now.artist + ' · ' + v.art.vinylName + ' pressing';
-
-    refs.heroToggle.innerHTML = (v.playing ? PAUSE_ICON_HERO : PLAY_ICON_HERO) + v.toggleLabel;
-    refs.heroToggle.onclick = actions.toggle;
-    refs.heroArt.onclick = actions.openPlayer;
-    refs.heroOpen.onclick = actions.openPlayer;
-
     rebuild(refs.playlistsGrid, JSON.stringify(v.playlists), () => v.playlists.forEach((pl) => {
       const btn = document.createElement('button');
       btn.className = 'pl-tile';
@@ -521,8 +932,8 @@
         '<span class="pl-name"></span>' +
         '<span class="pl-sub"></span>';
       btn.querySelector('.pl-disc-label').style.background = pl.color;
-      btn.querySelector('.pl-cover').style.background = pl.color;
       btn.querySelector('.pl-cover span').textContent = pl.name;
+      paintSleeve(btn.querySelector('.pl-cover'), pl, btn.querySelector('.pl-cover span'));
       btn.querySelector('.pl-name').textContent = pl.name;
       btn.querySelector('.pl-sub').textContent = pl.countLabel + ' · ' + pl.lengthLabel;
       btn.addEventListener('click', () => actions.openPlaylist(pl.idx));
@@ -533,7 +944,7 @@
   function renderList(v) {
     refs.listBack.onclick = actions.goHome;
     refs.listDiscDot.style.background = v.openPl.color;
-    refs.listDiscCover.style.background = v.openPl.color;
+    paintSleeve(refs.listDiscCover, v.openPl);
     refs.listTitle.textContent = v.openPl.name;
     refs.listSub.textContent = v.openPl.countLabel + ' · ' + v.openPl.lengthLabel;
     refs.listPlayAll.onclick = actions.playOpen;
@@ -541,7 +952,8 @@
     const rowsKey = JSON.stringify([state.openId, v.openTracks, v.art.vinylBg, v.spinState]);
     rebuild(refs.listRows, rowsKey, () => v.openTracks.forEach((t) => {
       const row = document.createElement('button');
-      row.className = 'track-row';
+      row.className = 'track-row' + (t.blocked ? ' blocked' : '');
+      if (t.blocked) row.title = "This song can't be played here";
       row.style.background = t.bg;
       row.style.color = t.color;
       row.innerHTML =
@@ -606,31 +1018,8 @@
     refs.playerCoverTitle.classList.toggle('hidden', v.art.hasThumb);
     refs.playerCoverArtist.classList.toggle('hidden', v.art.hasThumb);
 
-    refs.playerClose.onclick = actions.closePlayer;
-    refs.ledDot.style.background = v.ledColor;
-    refs.ledDot.style.boxShadow = v.ledGlow;
-    refs.playerStateLabel.textContent = v.stateLabel + ' · ' + v.nowPl.name;
     refs.playerTitle.textContent = v.now.title;
     refs.playerArtist.textContent = v.now.artist;
-
-    refs.playerOpenCrate.onclick = actions.openCrate;
-    refs.pressingDot.style.background = v.art.vinylBg;
-    refs.pressingName.textContent = v.art.vinylName + ' pressing';
-
-    rebuild(refs.upNextRows, JSON.stringify([state.plId, v.upNext]), () => v.upNext.forEach((u) => {
-      const row = document.createElement('button');
-      row.className = 'up-row';
-      row.innerHTML =
-        '<span class="up-cover"></span>' +
-        '<span class="up-meta"><span class="up-title"></span><span class="up-artist"></span></span>' +
-        '<span class="up-time mono"></span>';
-      row.querySelector('.up-cover').style.background = u.cover;
-      row.querySelector('.up-title').textContent = u.title;
-      row.querySelector('.up-artist').textContent = u.artist;
-      row.querySelector('.up-time').textContent = u.time;
-      row.addEventListener('click', () => actions.playTrack(state.plId, u.idx));
-      refs.upNextRows.appendChild(row);
-    }));
 
     // turntable
     refs.disc.style.background = v.art.vinylDisc;
@@ -656,12 +1045,19 @@
     const duration = DATA[state.plId].tracks[state.idx][2];
     refs.seekTrack.onclick = (e) => actions.seekFromEvent(e, refs.seekTrack, duration);
 
-    refs.btnStop.style.opacity = String(v.stopOpacity);
-    refs.btnStop.onclick = actions.stop;
     refs.btnPrev.onclick = actions.prev;
     refs.btnNext.onclick = actions.next;
     refs.btnToggle.innerHTML = v.playing ? PAUSE_ICON : PLAY_ICON;
     refs.btnToggle.onclick = actions.toggle;
+
+    setIcon(refs.btnShuffle, 'shuffle', SHUFFLE_ICON);
+    refs.btnShuffle.classList.toggle('on', state.shuffle);
+    refs.btnShuffle.setAttribute('aria-pressed', String(state.shuffle));
+    refs.btnShuffle.title = state.shuffle ? 'Shuffle: on' : 'Shuffle: off';
+    setIcon(refs.btnRepeat, state.repeat, REPEAT_ICONS[state.repeat] || REPEAT_ICONS.off);
+    refs.btnRepeat.classList.toggle('on', state.repeat !== 'off');
+    refs.btnRepeat.setAttribute('aria-label', REPEAT_LABELS[state.repeat] || REPEAT_LABELS.off);
+    refs.btnRepeat.title = refs.btnRepeat.getAttribute('aria-label');
   }
 
   function renderMinibar(v) {
@@ -684,6 +1080,78 @@
   }
 
   refs.goHome.addEventListener('click', actions.goHome);
+
+  refs.btnSettings.addEventListener('click', () => actions.togglePanel('settings'));
+  refs.btnShuffle.addEventListener('click', actions.toggleShuffle);
+  refs.btnRepeat.addEventListener('click', actions.cycleRepeat);
+  refs.spShuffle.addEventListener('click', actions.toggleShuffle);
+  refs.spRepeat.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => actions.setRepeat(b.dataset.v)));
+  refs.spMute.addEventListener('click', actions.toggleMute);
+  refs.spVolume.addEventListener('input', () => actions.setVolume(Number(refs.spVolume.value)));
+  refs.spFade.addEventListener('input', () => actions.setFade(Number(refs.spFade.value)));
+  refs.spXf.addEventListener('input', () => actions.setCrossfade(Number(refs.spXf.value)));
+  refs.spPressing.addEventListener('click', actions.openCrateFromSettings);
+
+  refs.btnQueue.addEventListener('click', () => actions.togglePanel('queue'));
+  refs.playerDismiss.addEventListener('click', actions.goHome);
+
+  // Click outside the open panel, Escape, or a resize closes it.
+  document.addEventListener('pointerdown', (e) => {
+    if (!state.panel || e.target.closest('#settings-panel, #queue-panel, #btn-settings, #btn-queue')) return;
+    setState({ panel: null });
+  });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.panel) setState({ panel: null }); });
+  window.addEventListener('resize', () => { if (state.panel) setState({ panel: null }); });
+
+  // Compact strip (the window is resized to it by the Electron shell).
+  refs.btnCompact.classList.toggle('hidden', !shell);
+  refs.compactExpand.classList.toggle('hidden', !shell);
+  refs.compactClose.classList.toggle('hidden', !shell);
+  refs.compactClose.addEventListener('click', () => shell.close());
+  refs.btnCompact.addEventListener('click', () => actions.setCompact(true));
+  refs.compactExpand.addEventListener('click', () => actions.setCompact(false));
+  refs.compactArt.addEventListener('click', () => actions.setCompact(false));
+  refs.compactPrev.addEventListener('click', () => actions.prev());
+  refs.compactToggle.addEventListener('click', () => actions.toggle());
+  refs.compactNext.addEventListener('click', () => actions.next());
+  refs.compactSeek.addEventListener('click', (e) => actions.seekFromEvent(e, refs.compactSeek, DATA[state.plId].tracks[state.idx][2]));
+  // The strip has no title bar: drag it by its background. (A CSS drag region
+  // would swallow the scroll-wheel volume, so the move is done by hand.)
+  refs.compact.addEventListener('pointerdown', (e) => {
+    if (!shell || e.button !== 0 || e.target.closest('button, .compact-seek')) return;
+    const sx = e.screenX, sy = e.screenY;
+    shell.dragStart();
+    refs.compact.setPointerCapture(e.pointerId);
+    refs.compact.classList.add('dragging');
+    const move = (m) => shell.dragMove(m.screenX - sx, m.screenY - sy);
+    const end = () => {
+      refs.compact.classList.remove('dragging');
+      refs.compact.removeEventListener('pointermove', move);
+      refs.compact.removeEventListener('pointerup', end);
+      refs.compact.removeEventListener('pointercancel', end);
+    };
+    refs.compact.addEventListener('pointermove', move);
+    refs.compact.addEventListener('pointerup', end);
+    refs.compact.addEventListener('pointercancel', end);
+  });
+
+  // Full window: the top bar is the title bar.
+  if (shell) {
+    document.body.classList.add('frameless');
+    refs.windowControls.classList.remove('hidden');
+    const showMaximized = (on) => {
+      setIcon(refs.winMax, on ? 'restore' : 'maximize', on ? RESTORE_ICON : MAXIMIZE_ICON);
+      refs.winMax.setAttribute('aria-label', on ? 'Restore' : 'Maximize');
+      refs.winMax.title = refs.winMax.getAttribute('aria-label');
+    };
+    showMaximized(false);
+    shell.onMaximizedChange(showMaximized);
+    refs.winMin.addEventListener('click', () => shell.minimize());
+    refs.winMax.addEventListener('click', () => shell.toggleMaximize());
+    refs.winClose.addEventListener('click', () => shell.close());
+  }
+
+  refs.compact.addEventListener('wheel', (e) => { e.preventDefault(); actions.nudgeVolume(e.deltaY < 0 ? 5 : -5); }, { passive: false });
 
   // ---------- player stage auto-fit ----------
   // Mirrors the design's ResizeObserver-driven `zoom` fit so the turntable
@@ -708,9 +1176,10 @@
     if (t[3]) {
       const s = Math.min(Math.floor(yt.player.time()), t[2]);
       if (s !== state.pos) setState({ pos: s });
+      maybeCrossfade(t);
       return;
     }
-    if (state.pos + 1 >= t[2]) step(1); else setState({ pos: state.pos + 1 });
+    if (state.pos + 1 >= t[2]) advance(); else setState({ pos: state.pos + 1 });
   }, 1000);
 
   // ---------- keyboard: space toggles play/pause ----------
@@ -722,9 +1191,85 @@
     }
   });
 
-  yt.onEnded(() => step(1));
+  yt.onEnded(() => advance());
+  yt.onError(onPlayError);
 
+  // Headphone/media-key pauses reach the YouTube player directly; follow it.
+  yt.onPlayState((playing) => { if (playing !== state.playing) setState({ playing }); });
+
+  // ---------- Windows media controls ----------
+  // Song info for the Windows media overlay, and media keys / headphone
+  // buttons routed through the app so its state stays in step.
+  const media = navigator.mediaSession;
+  if (media) {
+    const on = (action, fn) => { try { media.setActionHandler(action, fn); } catch (e) { /* unsupported action */ } };
+    on('play', () => { if (!state.playing) actions.toggle(); });
+    on('pause', () => { if (state.playing) actions.toggle(); });
+    on('nexttrack', () => actions.next());
+    on('previoustrack', () => actions.prev());
+  }
+  let mediaKey = '';
+  function syncMediaSession() {
+    if (!media || typeof MediaMetadata === 'undefined') return;
+    const t = DATA[state.plId].tracks[state.idx];
+    const key = state.plId + ':' + state.idx;
+    if (key !== mediaKey) {
+      mediaKey = key;
+      const art = t[4] ? [{ src: t[4].url, sizes: '480x360', type: 'image/jpeg' }] : [];
+      media.metadata = new MediaMetadata({ title: t[0], artist: t[1], album: DATA[state.plId].name, artwork: art });
+    }
+    media.playbackState = state.playing ? 'playing' : 'paused';
+  }
+
+  buildOrder(state.plId, state.idx);
+  applyVolume();
   render();
   fitStage();
   if (yt.signedIn()) syncYouTube();
+  window.addEventListener('beforeunload', saveSpot);
+
+  // ---------- updates (desktop app only) ----------
+  let update = null;
+  const UPDATE_VIEW = {
+    idle: () => ['b·side ' + update.version, 'Updates come from GitHub', 'Check for updates'],
+    latest: () => ['Up to date', '', 'Check for updates'],
+    checking: () => ['Checking for updates…', '', null],
+    available: (u) => ['Version ' + u.next + ' is available', 'Downloads while you listen', 'Update now'],
+    downloading: (u) => ['Downloading ' + u.next + '…', (u.percent || 0) + '% · keep listening', null],
+    ready: (u) => ['Version ' + u.next + ' is ready', 'Restarts and carries on playing', 'Restart now'],
+    error: (u) => ["Couldn't update", u.message || 'Check your connection', 'Try again']
+  };
+
+  function renderUpdate() {
+    const view = update && UPDATE_VIEW[update.state];
+    refs.spApp.classList.toggle('hidden', !view);
+    refs.btnSettings.classList.toggle('has-update', !!update && (update.state === 'available' || update.state === 'ready'));
+    if (!view) return;
+    const [title, sub, button] = view(update);
+    refs.spUpdateTitle.textContent = title;
+    refs.spUpdateSub.textContent = sub || 'b·side ' + update.version;
+    refs.spUpdateBtn.classList.toggle('hidden', !button);
+    refs.spUpdateBtn.classList.toggle('accent', update.state === 'available' || update.state === 'ready');
+    refs.spUpdateBtn.textContent = button || '';
+    refs.spProgress.classList.toggle('hidden', update.state !== 'downloading');
+    refs.spProgressFill.style.width = (update.percent || 0) + '%';
+  }
+
+  if (shell && shell.updates) {
+    shell.updates.onStatus((s) => { update = s; renderUpdate(); });
+    shell.updates.status().then((s) => { update = s; renderUpdate(); });
+    refs.spUpdateBtn.addEventListener('click', () => {
+      if (!update) return;
+      if (update.state === 'available') shell.updates.download();
+      else if (update.state === 'ready') {
+        // Save the spot with "keep playing" so the restarted app carries on.
+        restarting = true;
+        saveSpot();
+        shell.updates.install();
+      } else shell.updates.check();
+    });
+  }
+  booted = true;
+  hideSplash();
+  setTimeout(() => hideSplash(true), SPLASH_MAX_MS);
 })();

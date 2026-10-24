@@ -60,7 +60,7 @@ window.BSideYouTube = (() => {
   function signOut() {
     if (token && window.google && google.accounts) google.accounts.oauth2.revoke(token.value, () => {});
     saveToken(null);
-    if (player) player.stopVideo();
+    stopAll();
   }
 
   async function api(path, params) {
@@ -140,6 +140,13 @@ window.BSideYouTube = (() => {
     return liked.items.filter(isMusic).map(trackFromVideo);
   }
 
+  // The playlist's own cover, as YouTube Music shows it. A playlist whose
+  // first video is gone gets YouTube's grey placeholder; treat that as none.
+  function playlistCover(p) {
+    const c = thumbFor(p);
+    return c && !/no_thumbnail/.test(c.url) ? c : null;
+  }
+
   // Liked music first, then the user's playlists (first 50 songs of each).
   async function library() {
     const [likedTracks, pls] = await Promise.all([
@@ -148,30 +155,103 @@ window.BSideYouTube = (() => {
     ]);
     const lists = await Promise.all(pls.items
       .filter((p) => p.contentDetails.itemCount > 0)
-      .map(async (p) => ({ name: p.snippet.title, tracks: await playlistTracks(p.id) })));
-    const out = likedTracks.length ? [{ name: 'Liked music', tracks: likedTracks }] : [];
+      .map(async (p) => ({ id: p.id, name: p.snippet.title, tracks: await playlistTracks(p.id), cover: playlistCover(p) })));
+    const out = likedTracks.length ? [{ id: 'LM', name: 'Liked music', tracks: likedTracks, cover: null }] : [];
     return out.concat(lists.filter((l) => l.tracks.length));
   }
 
   // ---------- playback ----------
   // The player is kept invisible (see .yt-card); YouTube's terms ask for it
   // to be visible, so hiding it is a deliberate choice for this app.
+  //
+  // There are two decks so a crossfade can start the next track while the
+  // current one fades out. Only the active deck reports state, time and
+  // errors. Each deck plays at the master volume times its own fade gain.
 
-  let player = null;
+  const PLAYING = 1, PAUSED = 2, BUFFERING = 3, ENDED = 0;
+  // A skip fades the outgoing track quickly rather than waiting out the full fade.
+  const SKIP_FADE_MAX = 800;
+
+  const decks = ['yt-player', 'yt-player-2'].map((el) => ({ el, player: null, gain: 1, ramp: null, fadeIn: 0, fadeOther: 0 }));
+  let active = 0;
+  let master = 100;
+  let ready = false;
   let playerReady = null;
+  let loadSeq = 0;
   let onEnded = () => {};
+  let onError = () => {};
+  let onPlayState = () => {};
+
+  const deck = () => decks[active];
+  const other = () => decks[1 - active];
+
+  function apply(d) {
+    if (d.player && d.player.setVolume) d.player.setVolume(Math.round(master * d.gain));
+  }
+
+  function audible(d) {
+    const s = d.player && d.player.getPlayerState ? d.player.getPlayerState() : -1;
+    return (s === PLAYING || s === BUFFERING) && d.gain > 0;
+  }
+
+  // Move a deck's gain to `to` over `ms`. Resolves true on arrival, false if
+  // another ramp on the same deck replaced it first.
+  function ramp(d, to, ms) {
+    if (d.ramp) d.ramp.cancel();
+    return new Promise((resolve) => {
+      const from = d.gain;
+      if (!ms || from === to) { d.gain = to; apply(d); resolve(true); return; }
+      const t0 = performance.now();
+      const id = setInterval(() => {
+        const k = Math.min(1, (performance.now() - t0) / ms);
+        d.gain = from + (to - from) * k;
+        apply(d);
+        if (k === 1) { clearInterval(id); d.ramp = null; resolve(true); }
+      }, 40);
+      d.ramp = { cancel: () => { clearInterval(id); d.ramp = null; resolve(false); } };
+    });
+  }
+
+  // Only ever called on the inactive deck.
+  function fadeOutAndStop(d, ms) {
+    d.fadeIn = 0;
+    d.fadeOther = 0;
+    if (!audible(d)) {
+      if (d.ramp) d.ramp.cancel();
+      if (d.player && d.player.stopVideo) d.player.stopVideo();
+      return;
+    }
+    ramp(d, 0, ms).then((done) => { if (done && d !== deck()) d.player.stopVideo(); });
+  }
+
+  function stateChange(d, s) {
+    if (d !== deck()) return;
+    if (s === PLAYING) {
+      if (d.fadeIn) { ramp(d, 1, d.fadeIn); d.fadeIn = 0; }
+      if (d.fadeOther) { fadeOutAndStop(other(), d.fadeOther); d.fadeOther = 0; }
+      onPlayState(true);
+    } else if (s === PAUSED) {
+      onPlayState(false);
+    } else if (s === ENDED) {
+      onEnded();
+    }
+  }
 
   function ensurePlayer() {
     if (!playerReady) {
       playerReady = new Promise((resolve, reject) => {
         window.onYouTubeIframeAPIReady = () => {
-          player = new YT.Player('yt-player', {
-            width: 200, height: 200,
-            playerVars: { playsinline: 1, controls: 0, disablekb: 1, rel: 0 },
-            events: {
-              onReady: () => resolve(player),
-              onStateChange: (e) => { if (e.data === YT.PlayerState.ENDED) onEnded(); }
-            }
+          let n = 0;
+          decks.forEach((d) => {
+            d.player = new YT.Player(d.el, {
+              width: 200, height: 200,
+              playerVars: { playsinline: 1, controls: 0, disablekb: 1, rel: 0 },
+              events: {
+                onReady: () => { apply(d); if (++n === decks.length) { ready = true; resolve(); } },
+                onStateChange: (e) => stateChange(d, e.data),
+                onError: (e) => { if (d === deck()) onError(e.data); }
+              }
+            });
           });
         };
         loadScript('https://www.youtube.com/iframe_api').catch(reject);
@@ -180,10 +260,66 @@ window.BSideYouTube = (() => {
     return playerReady;
   }
 
-  async function load(videoId, start, autoplay) {
-    const p = await ensurePlayer();
+  async function load(videoId, start, autoplay, fadeMs) {
+    await ensurePlayer();
+    const seq = ++loadSeq;
+    const d = deck();
+    const quick = Math.min(fadeMs, SKIP_FADE_MAX);
+    fadeOutAndStop(other(), quick);
+    if (fadeMs && audible(d)) await ramp(d, 0, quick);
+    if (seq !== loadSeq) return; // skipped again while fading
+    if (d.ramp) d.ramp.cancel();
+    d.fadeOther = 0;
+    d.fadeIn = autoplay ? fadeMs : 0;
+    d.gain = d.fadeIn ? 0 : 1;
+    apply(d);
     const opts = { videoId, startSeconds: start || 0 };
-    if (autoplay) p.loadVideoById(opts); else p.cueVideoById(opts);
+    if (autoplay) d.player.loadVideoById(opts); else d.player.cueVideoById(opts);
+  }
+
+  // Start videoId on the idle deck and blend over `ms` once it is playing.
+  async function crossfade(videoId, ms) {
+    await ensurePlayer();
+    ++loadSeq;
+    active = 1 - active;
+    const d = deck();
+    if (d.ramp) d.ramp.cancel();
+    d.gain = 0;
+    apply(d);
+    d.fadeIn = ms;
+    d.fadeOther = ms;
+    d.player.loadVideoById({ videoId, startSeconds: 0 });
+  }
+
+  function play(fadeMs) {
+    const d = deck();
+    if (!ready) return;
+    const s = d.player.getPlayerState();
+    if (s === PLAYING || s === BUFFERING) { ramp(d, 1, fadeMs); return; }
+    if (d.ramp) d.ramp.cancel();
+    d.fadeIn = fadeMs;
+    d.gain = fadeMs ? 0 : 1;
+    apply(d);
+    d.player.playVideo();
+  }
+
+  // Resolves true once paused, false if playback resumed during the fade.
+  async function pause(fadeMs) {
+    const d = deck();
+    if (!ready) return true;
+    fadeOutAndStop(other(), fadeMs);
+    d.fadeIn = 0;
+    if (!audible(d)) { d.player.pauseVideo(); return true; }
+    const done = await ramp(d, 0, fadeMs);
+    if (done) d.player.pauseVideo();
+    return done;
+  }
+
+  function stopAll() {
+    decks.forEach((d) => {
+      if (d.ramp) d.ramp.cancel();
+      if (d.player && d.player.stopVideo) d.player.stopVideo();
+    });
   }
 
   return {
@@ -191,12 +327,16 @@ window.BSideYouTube = (() => {
     signedIn: () => !!token,
     signIn, signOut, profile, library, ensurePlayer,
     onEnded: (fn) => { onEnded = fn; },
+    onError: (fn) => { onError = fn; },
+    // Playing/paused as the player reports it, including changes made outside
+    // the app (headphone buttons, keyboard media keys, Windows' media controls).
+    onPlayState: (fn) => { onPlayState = fn; },
+    setVolume: (v) => { master = v; decks.forEach(apply); },
     player: {
-      load,
-      play: () => player && player.playVideo(),
-      pause: () => player && player.pauseVideo(),
-      seek: (s) => player && player.seekTo(s, true),
-      time: () => (player && player.getCurrentTime ? player.getCurrentTime() || 0 : 0)
+      load, crossfade, play, pause,
+      seek: (s) => { if (ready) deck().player.seekTo(s, true); },
+      time: () => (ready ? deck().player.getCurrentTime() || 0 : 0),
+      duration: () => (ready ? deck().player.getDuration() || 0 : 0)
     }
   };
 })();

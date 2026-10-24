@@ -1,0 +1,67 @@
+{
+  "name": "b-side",
+  "productName": "b·side",
+  "version": "1.1.0",
+  "description": "b·side music player",
+  "author": "AliAliAljasim",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "./build-config.sh && electron .",
+    "dist:win": "./build-config.sh && electron-builder --win --x64",
+    "release:win": "./build-config.sh && GH_TOKEN=$(gh auth token) electron-builder --win --x64 --publish always"
+  },
+  "build": {
+    "appId": "com.alialialjasim.bside",
+    "productName": "b-side",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "app.js",
+      "youtube.js",
+      "config.js",
+      "style.css",
+      "package.json",
+      "build/icon.ico"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "executableName": "b-side",
+      "signAndEditExecutable": false
+    },
+    "afterPack": "scripts/after-pack.js",
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "b·side",
+      "uninstallDisplayName": "b·side",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "artifactName": "b-side-setup-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "AliAliAljasim",
+        "repo": "music-player",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "rcedit": "^5.0.2"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  }
+}
