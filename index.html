@@ -95,6 +95,7 @@
         <button data-sec="set-sound">Sound</button>
         <button data-sec="set-appearance">Appearance</button>
         <button data-sec="sp-desktop" class="needs-desktop">Desktop</button>
+        <button data-sec="set-keys">Keyboard shortcuts</button>
         <button data-sec="set-account">YouTube Music</button>
         <button data-sec="sp-app" class="needs-updates">About &amp; updates</button>
       </nav>
@@ -146,11 +147,26 @@
             <span>Closing keeps playing in the tray</span>
             <button class="switch" id="sp-tray-close" role="switch" aria-checked="false" aria-label="Closing keeps playing in the tray"><span></span></button>
           </div>
-          <div class="sp-line">
-            <span>Keyboard shortcuts</span>
-            <button class="switch" id="sp-keys" role="switch" aria-checked="false" aria-label="Keyboard shortcuts"><span></span></button>
+        </section>
+        <section class="settings-card" id="set-keys">
+          <h2>Keyboard shortcuts</h2>
+          <div class="keys-group desktop-only">
+            <div class="sp-line">
+              <span>Global shortcuts</span>
+              <button class="switch" id="sp-keys" role="switch" aria-checked="false" aria-label="Global shortcuts"><span></span></button>
+            </div>
+            <p class="sp-help">Work from any app, even while Groove is in the tray.</p>
+            <dl class="keys" id="keys-global"></dl>
           </div>
-          <p class="sp-help" id="sp-keys-help"></p>
+          <div class="keys-group">
+            <span class="keys-head">In Groove</span>
+            <dl class="keys" id="keys-app"></dl>
+            <p class="sp-help">Your keyboard's media keys and headphone buttons also play, pause and skip.</p>
+          </div>
+          <div class="keys-foot">
+            <p class="sp-help" id="keys-msg">Click a shortcut, press up to 4 keys, then Esc to save.</p>
+            <button class="pill pill-ghost" id="keys-reset">Restore defaults</button>
+          </div>
         </section>
         <section class="settings-card" id="set-account">
           <h2>YouTube Music</h2>

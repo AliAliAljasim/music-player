@@ -55,7 +55,7 @@
 
   // Playback preferences, remembered between visits. fade and crossfade are seconds (0 = off).
   const PREFS_KEY = 'bside.prefs';
-  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false, sortKey: '', sortDir: 1 };
+  const PREFS = { shuffle: false, repeat: 'off', volume: 80, muted: false, fade: 1.5, crossfade: 0, lyrics: false, sortKey: '', sortDir: 1, keys: {} };
 
   function loadPrefs() {
     try {
@@ -859,7 +859,7 @@
     compactPrev: el('compact-prev'), compactToggle: el('compact-toggle'), compactNext: el('compact-next'),
     compactExpand: el('compact-expand'),
     spDesktop: el('sp-desktop'), spLogin: el('sp-login'), spLoginModeRow: el('sp-login-mode-row'), spLoginMode: el('sp-login-mode'),
-    spTrayClose: el('sp-tray-close'), spKeys: el('sp-keys'), spKeysHelp: el('sp-keys-help'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
+    spTrayClose: el('sp-tray-close'), spKeys: el('sp-keys'), keysGlobal: el('keys-global'), keysApp: el('keys-app'), keysMsg: el('keys-msg'), keysReset: el('keys-reset'), compactSeek: el('compact-seek'), compactSeekFill: el('compact-seek-fill'),
 
     splash: el('splash'), scroller: el('scroller'),
     viewSettings: el('view-settings'), settingsBack: el('settings-back'), settingsNav: el('settings-nav'), spMore: el('sp-more'),
@@ -1716,14 +1716,6 @@
       setState({ search: { ...state.search, q: '' }, view: state.view === 'search' ? viewBeforeSearch : state.view });
     }
   });
-  window.addEventListener('keydown', (e) => {
-    const typing = /INPUT|TEXTAREA/.test((e.target && e.target.tagName) || '');
-    if ((e.ctrlKey && e.key.toLowerCase() === 'f') || (e.key === '/' && !typing)) {
-      e.preventDefault();
-      refs.searchInput.focus();
-      refs.searchInput.select();
-    }
-  });
   refs.playerDismiss.addEventListener('click', actions.goHome);
   refs.playerLyrics.addEventListener('click', () => setPrefs({ lyrics: !state.lyrics }));
 
@@ -1830,15 +1822,6 @@
     if (state.pos + 1 >= t[2]) songEnded(); else setState({ pos: state.pos + 1 });
   }, 1000);
 
-  // ---------- keyboard: space toggles play/pause ----------
-  window.addEventListener('keydown', (e) => {
-    const tag = (e.target && e.target.tagName) || '';
-    if (e.code === 'Space' && !/INPUT|TEXTAREA/.test(tag) && !e.target.isContentEditable) {
-      e.preventDefault();
-      actions.toggle();
-    }
-  });
-
   yt.onEnded(songEnded);
   yt.onError(onPlayError);
 
@@ -1908,7 +1891,6 @@
 
   // ---------- desktop settings (tray, startup, shortcuts, keep on top) ----------
   let desk = null;
-  const KEYS_HELP = 'Ctrl+Alt+Space play/pause · Ctrl+Alt+← → previous/next · Ctrl+Alt+↑ ↓ volume';
 
   function setSwitch(b, on) {
     b.classList.toggle('on', on);
@@ -1930,21 +1912,186 @@
       label.textContent = pct + '%';
     }
     setSwitch(refs.spKeys, !!desk.shortcuts);
-    refs.spKeysHelp.textContent = '';
-    if (desk.shortcuts) {
-      refs.spKeysHelp.append(KEYS_HELP);
-      if (desk.shortcutErrors && desk.shortcutErrors.length) {
-        const w = document.createElement('span');
-        w.className = 'warn';
-        w.textContent = ' · Taken by another app: ' + desk.shortcutErrors.join(', ');
-        refs.spKeysHelp.append(w);
-      }
-    }
+    renderKeys();
   }
 
   function changeDesktop(patch) {
-    shell.settings(patch).then((s) => { desk = s; renderDesktop(); });
+    return shell.settings(patch).then((s) => { desk = s; renderDesktop(); });
   }
+
+  // ---------- keyboard shortcuts ----------
+  // Shortcuts are written as Electron accelerators ("Ctrl+Alt+Space"), so the
+  // global ones go to the main process as they are and the in-app ones are
+  // matched against the same text built from each key press.
+  const GLOBAL_KEYS = [['toggle', 'Play / pause'], ['next', 'Next song'], ['prev', 'Previous song'], ['volup', 'Volume up'], ['voldown', 'Volume down']];
+  const APP_KEYS = [['toggle', 'Play / pause', 'Space'], ['search', 'Search', 'Ctrl+F']];
+  const MODIFIERS = { Control: 'Ctrl', Alt: 'Alt', Shift: 'Shift' };
+  const KEY_LABELS = { Up: '↑', Down: '↓', Left: '←', Right: '→', Escape: 'Esc', MediaPlayPause: 'Play/Pause', MediaNextTrack: 'Next track', MediaPreviousTrack: 'Previous track', MediaStop: 'Stop', VolumeUp: 'Volume up', VolumeDown: 'Volume down', VolumeMute: 'Mute' };
+  const CODE_KEYS = {
+    Space: 'Space', Enter: 'Enter', Tab: 'Tab', Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert',
+    Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+    Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backquote: '`',
+    NumpadAdd: 'numadd', NumpadSubtract: 'numsub', NumpadMultiply: 'nummult', NumpadDivide: 'numdiv', NumpadDecimal: 'numdec', NumpadEnter: 'Enter',
+    MediaPlayPause: 'MediaPlayPause', MediaTrackNext: 'MediaNextTrack', MediaTrackPrevious: 'MediaPreviousTrack', MediaStop: 'MediaStop',
+    AudioVolumeUp: 'VolumeUp', AudioVolumeDown: 'VolumeDown', AudioVolumeMute: 'VolumeMute'
+  };
+  // The key part of an accelerator, from KeyboardEvent.code (layout-independent).
+  function keyOf(code) {
+    let m;
+    if ((m = /^Key([A-Z])$/.exec(code)) || (m = /^Digit(\d)$/.exec(code)) || (m = /^(F\d{1,2})$/.exec(code))) return m[1];
+    if ((m = /^Numpad(\d)$/.exec(code))) return 'num' + m[1];
+    return CODE_KEYS[code] || '';
+  }
+  function comboOf(e) {
+    const key = keyOf(e.code);
+    if (!key) return '';
+    return [e.ctrlKey && 'Ctrl', e.altKey && 'Alt', e.shiftKey && 'Shift', key].filter(Boolean).join('+');
+  }
+  function keyLabel(k) {
+    if (KEY_LABELS[k]) return KEY_LABELS[k];
+    const m = /^num(\d|add|sub|mult|div|dec)$/.exec(k);
+    return m ? 'Num ' + ({ add: '+', sub: '-', mult: '*', div: '/', dec: '.' }[m[1]] || m[1]) : k;
+  }
+  // The key part is last; a combo never ends in "+" (Equal is "=", numpad + is "numadd").
+  const comboKeys = (combo) => (combo ? combo.split('+') : []);
+  const appKeys = () => Object.fromEntries(APP_KEYS.map(([cmd, , def]) => [cmd, typeof state.keys[cmd] === 'string' ? state.keys[cmd] : def]));
+
+  // While recording, every key press goes to the recorder. Keys held together
+  // make the combination; pressing again after letting go starts over. Esc saves.
+  let rec = null; // { group, cmd, mods: Set, key, down: Set, error }
+  const KEYS_HINT = 'Click a shortcut, press up to 4 keys, then Esc to save.';
+
+  function startRecording(group, cmd) {
+    if (rec) stopRecording();
+    rec = { group, cmd, mods: new Set(), key: '', down: new Set(), error: '' };
+    if (shell && shell.settings && group === 'global') changeDesktop({ recording: true });
+    renderKeys();
+  }
+  function stopRecording() {
+    if (!rec) return;
+    const wasGlobal = rec.group === 'global';
+    rec = null;
+    if (wasGlobal && shell && shell.settings) changeDesktop({ recording: false }); else renderKeys();
+  }
+  const recCombo = () => (rec ? [...['Ctrl', 'Alt', 'Shift'].filter((m) => rec.mods.has(m)), rec.key].filter(Boolean).join('+') : '');
+
+  function saveRecording() {
+    const combo = recCombo();
+    if (!combo) return stopRecording(); // nothing pressed: keep the old keys
+    const fail = (msg) => { rec.error = msg; renderKeys(); };
+    if (!rec.key) return fail('Add a key that isn\'t Ctrl, Alt or Shift');
+    const loose = !rec.mods.size && !/^(F\d+|Media\w+|Volume\w+)$/.test(rec.key);
+    if (rec.group === 'global' && loose) return fail('Needs Ctrl, Alt or Shift, so typing in other apps still works');
+    // The same keys can't do two things.
+    const used = [
+      ...(desk && desk.keys ? GLOBAL_KEYS.map(([cmd, label]) => ['global', cmd, label, desk.keys[cmd]]) : []),
+      ...APP_KEYS.map(([cmd, label]) => ['app', cmd, label, appKeys()[cmd]]),
+      ['app', 'esc', 'Close menu or panel', 'Escape']
+    ].find(([g, cmd, , k]) => k === combo && !(g === rec.group && cmd === rec.cmd));
+    if (used) return fail('Conflicts with ' + (used[0] === 'global' ? 'Global' : 'In Groove') + ' → ' + used[2]);
+    const { group, cmd } = rec;
+    if (group === 'global') {
+      rec = null;
+      changeDesktop({ keys: { [cmd]: combo }, recording: false });
+    } else {
+      setPrefs({ keys: { ...state.keys, [cmd]: combo } });
+      stopRecording();
+    }
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (!rec) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.repeat) return;
+    if (e.key === 'Escape') return saveRecording();
+    if (!rec.down.size) { rec.mods.clear(); rec.key = ''; rec.error = ''; rec.nudged = false; } // a fresh press starts over
+    rec.down.add(e.code);
+    if (MODIFIERS[e.key]) rec.mods.add(MODIFIERS[e.key]);
+    else if (keyOf(e.code)) rec.key = keyOf(e.code);
+    renderKeys();
+  }, true);
+  window.addEventListener('keyup', (e) => { if (rec) { e.preventDefault(); rec.down.delete(e.code); } }, true);
+  // Clicking elsewhere with unsaved keys first reminds about Esc; clicking
+  // away again, or switching away from the window, cancels.
+  document.addEventListener('pointerdown', (e) => {
+    if (!rec || e.target.closest('.key-edit')) return;
+    if (recCombo() && !rec.error && !rec.nudged) { rec.nudged = true; renderKeys(); } else stopRecording();
+  }, true);
+  window.addEventListener('blur', stopRecording);
+
+  // The in-app shortcuts. Plain keys are left alone while typing in a field.
+  window.addEventListener('keydown', (e) => {
+    const combo = comboOf(e);
+    if (!combo || e.defaultPrevented) return;
+    const t = e.target || {};
+    if ((/INPUT|TEXTAREA|SELECT/.test(t.tagName || '') || t.isContentEditable) && !e.ctrlKey && !e.altKey) return;
+    const cmd = Object.entries(appKeys()).find(([, k]) => k === combo);
+    if (!cmd) return;
+    e.preventDefault();
+    if (cmd[0] === 'toggle') actions.toggle();
+    else if (cmd[0] === 'search') { refs.searchInput.focus(); refs.searchInput.select(); }
+  });
+
+  function keyRow(group, cmd, label, combo, opts = {}) {
+    const row = document.createElement('div');
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    const recording = rec && rec.group === group && rec.cmd === cmd;
+    const shown = recording ? recCombo() : combo;
+    const box = opts.fixed ? dd : document.createElement('button');
+    if (!opts.fixed) {
+      box.className = 'key-edit' + (recording ? ' recording' : '');
+      box.setAttribute('aria-label', 'Change shortcut for ' + label + (combo ? ' (now ' + comboKeys(combo).map(keyLabel).join(' + ') + ')' : ''));
+      box.addEventListener('click', () => { if (!recording) startRecording(group, cmd); });
+      dd.append(box);
+    }
+    if (recording && !shown) {
+      const p = document.createElement('span');
+      p.className = 'key-prompt';
+      p.textContent = 'Press keys…';
+      box.append(p);
+    }
+    for (const k of comboKeys(shown)) {
+      const kbd = document.createElement('kbd');
+      kbd.textContent = keyLabel(k);
+      box.append(kbd);
+    }
+    row.append(dt, dd);
+    // Problems show under the row they belong to.
+    const error = recording ? rec.error : opts.taken ? 'Taken by another app. Click to pick different keys' : '';
+    const hint = recording && !error && rec.nudged ? 'Press Esc to save' : '';
+    row.classList.toggle('error', !!error);
+    if (error || hint) {
+      const p = document.createElement('p');
+      p.className = 'key-error' + (hint ? ' key-hint' : '');
+      p.textContent = error || hint;
+      row.append(p);
+    }
+    return row;
+  }
+
+  function renderKeys() {
+    if (desk && desk.keys) {
+      const taken = desk.shortcuts ? desk.shortcutErrors || [] : [];
+      refs.keysGlobal.classList.toggle('off', !desk.shortcuts);
+      refs.keysGlobal.replaceChildren(...GLOBAL_KEYS.map(([cmd, label]) => keyRow('global', cmd, label, desk.keys[cmd], { taken: taken.includes(cmd) })));
+    }
+    const ak = appKeys();
+    refs.keysApp.replaceChildren(
+      ...APP_KEYS.map(([cmd, label]) => keyRow('app', cmd, label, ak[cmd])),
+      keyRow('app', 'esc', 'Close menu or panel, clear search', 'Escape', { fixed: true })
+    );
+    refs.keysMsg.textContent = rec ? 'Press the new keys, then Esc to save.' : KEYS_HINT;
+  }
+
+  refs.keysReset.addEventListener('click', () => {
+    stopRecording();
+    setPrefs({ keys: {} });
+    if (desk && shell && shell.settings) changeDesktop({ keys: null }); else renderKeys();
+  });
+  renderKeys();
 
   renderDesktop(); // hides the desktop-only settings until (unless) the shell answers
   // Volume-mixer link: changes made in Windows' mixer move Groove's slider.

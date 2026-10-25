@@ -187,13 +187,14 @@ function setupUpdates(win) {
 // controls); optional start at Windows sign-in, as a window or tray-only;
 // optional "close keeps playing in the tray"; global Ctrl+Alt shortcuts.
 
-const SHORTCUTS = [
-  ['CommandOrControl+Alt+Space', 'toggle'],
-  ['CommandOrControl+Alt+Right', 'next'],
-  ['CommandOrControl+Alt+Left', 'prev'],
-  ['CommandOrControl+Alt+Up', 'volup'],
-  ['CommandOrControl+Alt+Down', 'voldown']
-];
+// Default keys per command; the user can change them in Settings.
+const SHORTCUTS = {
+  toggle: 'Ctrl+Alt+Space',
+  next: 'Ctrl+Alt+Right',
+  prev: 'Ctrl+Alt+Left',
+  volup: 'Ctrl+Alt+Up',
+  voldown: 'Ctrl+Alt+Down'
+};
 // Taskbar thumbnail button icons, drawn as white polygons on a 16-unit grid
 // (Windows can't use SVG here, and this saves shipping PNGs).
 const THUMB_SHAPES = {
@@ -421,7 +422,8 @@ function setupDesktop(win, ws, switchMode) {
   ipcMain.on('bside:now-playing', (e, info) => {
     if (e.sender !== win.webContents || !info) return;
     now = { title: String(info.title || ''), artist: String(info.artist || ''), playing: !!info.playing };
-    if (win.isVisible()) setThumbar(false);
+    // Minimized windows keep their buttons (isVisible is false then on Windows).
+    if (win.isVisible() || win.isMinimized()) setThumbar(false);
     if (!tray) return;
     tray.setToolTip((now.title ? now.title + (now.artist ? ' — ' + now.artist : '') : 'Groove').slice(0, 127));
     buildMenu();
@@ -429,18 +431,31 @@ function setupDesktop(win, ws, switchMode) {
 
   win.on('close', (e) => { if (tray && d.closeToTray && !quitting) { e.preventDefault(); win.hide(); } });
 
+  // Saved keys, minus any that aren't a plain accelerator string.
+  const keys = () => {
+    const k = { ...SHORTCUTS };
+    for (const cmd of Object.keys(SHORTCUTS)) {
+      const v = d.keys && d.keys[cmd];
+      if (typeof v === 'string' && v.length <= 40) k[cmd] = v;
+    }
+    return k;
+  };
   let shortcutErrors = [];
+  let recording = false; // the page is recording new keys: let them reach it
   const applyShortcuts = () => {
     globalShortcut.unregisterAll();
+    if (recording) return;
     shortcutErrors = [];
     if (!d.shortcuts) return;
-    for (const [accel, cmd] of SHORTCUTS) {
+    for (const [cmd, accel] of Object.entries(keys())) {
       let ok = false;
       try { ok = globalShortcut.register(accel, () => send(cmd)); } catch (e) { /* invalid on this system */ }
-      if (!ok) shortcutErrors.push(accel.replace('CommandOrControl', 'Ctrl'));
+      if (!ok) shortcutErrors.push(cmd);
     }
   };
   applyShortcuts();
+  // A reload mid-recording must not leave the shortcuts off.
+  win.webContents.on('did-finish-load', () => { if (recording) { recording = false; applyShortcuts(); } });
   app.on('will-quit', () => globalShortcut.unregisterAll());
 
   // Startup at sign-in only makes sense for the installed app.
@@ -449,14 +464,18 @@ function setupDesktop(win, ws, switchMode) {
     canStartup: app.isPackaged,
     openAtLogin: app.isPackaged && app.getLoginItemSettings({ args: LOGIN_ARGS }).openAtLogin,
     startInTray: d.startInTray, closeToTray: d.closeToTray, shortcuts: d.shortcuts,
-    shortcutErrors, pinned: !!ws.pinned
+    keys: keys(), shortcutErrors, pinned: !!ws.pinned
   });
   ipcMain.handle('bside:settings', (e, patch) => {
     if (e.sender !== win.webContents) return settings();
     if (patch) {
       if ('openAtLogin' in patch && app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!patch.openAtLogin, args: LOGIN_ARGS });
       for (const k of ['startInTray', 'closeToTray', 'shortcuts']) if (k in patch) d[k] = !!patch[k];
-      if ('shortcuts' in patch) applyShortcuts();
+      if ('keys' in patch) {
+        d.keys = patch.keys && typeof patch.keys === 'object' ? { ...d.keys, ...patch.keys } : {};
+      }
+      if ('recording' in patch) recording = !!patch.recording;
+      if ('shortcuts' in patch || 'keys' in patch || 'recording' in patch) applyShortcuts();
       if ('pinned' in patch) { ws.pinned = !!patch.pinned; win.setAlwaysOnTop(ws.mode === 'compact' && ws.pinned); }
       for (const [key, mode] of [['opacityCompact', 'compact'], ['opacityFull', 'full']]) {
         if (typeof patch[key] !== 'number') continue;
