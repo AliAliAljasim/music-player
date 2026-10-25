@@ -153,19 +153,22 @@ function applyMode(win, ws, mode) {
 // Restart now or the next time the app quits.
 
 function setupUpdates(win) {
-  let status = { state: app.isPackaged ? 'idle' : 'unavailable', version: app.getVersion() };
+  // A build without app-update.yml (running from source, or a test copy) has
+  // nowhere to update from.
+  const canUpdate = app.isPackaged && fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'));
+  let status = { state: canUpdate ? 'idle' : 'unavailable', version: app.getVersion() };
   const set = (patch) => {
     status = { ...status, ...patch };
     if (!win.isDestroyed()) win.webContents.send('bside:update', status);
   };
   ipcMain.handle('bside:update', (e, action) => {
-    if (e.sender !== win.webContents || !app.isPackaged) return status;
+    if (e.sender !== win.webContents || !canUpdate) return status;
     if (action === 'check') autoUpdater.checkForUpdates().catch(() => {});
     else if (action === 'download') autoUpdater.downloadUpdate().catch(() => {});
     else if (action === 'install') setImmediate(() => autoUpdater.quitAndInstall(true, true));
     return status;
   });
-  if (!app.isPackaged) return; // running from source: nothing to update
+  if (!canUpdate) return;
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
