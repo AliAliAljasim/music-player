@@ -69,7 +69,7 @@
   const state = {
     view: 'player', openId: 1, plId: 1, idx: 2, pos: 0,
     playing: false, pick: null, rpm: 33, zoom: 1,
-    account: null, syncing: false, ytError: '', notice: '', panel: null, volumeHint: false,
+    account: null, syncing: false, ytError: '', panel: null, volumeHint: false,
     qTrack: null, menu: null, sleep: null, listFilter: '',
     search: { q: '', ytQ: '', yt: null, loading: false, error: '' },
     ...PREFS, ...loadPrefs()
@@ -119,11 +119,50 @@
     }
   }
 
-  let noticeTimer = 0;
-  function notify(text) {
-    clearTimeout(noticeTimer);
-    setState({ notice: text });
-    noticeTimer = setTimeout(() => setState({ notice: '' }), 6000);
+  // ---------- toasts ----------
+  // A small card at the top right: a title, an optional detail line (the
+  // song, or what went wrong) and an icon for the kind: ok, like, info or
+  // error. Errors stay longer; hovering keeps any toast up. `opts.id`
+  // replaces a toast with the same id (the volume, a YouTube error) instead
+  // of stacking another; `opts.sticky` keeps it until closed or replaced.
+  const TOAST_ICONS = {
+    ok: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>',
+    like: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"></path></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 11v6"></path><path d="M12 7.2v.1"></path></svg>',
+    error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 6.5v7"></path><path d="M12 17.3v.1"></path></svg>'
+  };
+  const TOAST_MAX = 3;
+  const toastTimers = new WeakMap();
+
+  function dismissToast(node) {
+    if (!node || node.classList.contains('leaving')) return;
+    clearTimeout(toastTimers.get(node));
+    node.classList.add('leaving');
+    setTimeout(() => node.remove(), 180);
+  }
+
+  function notify(title, detail = '', kind = 'ok', opts = {}) {
+    const box = document.getElementById('toasts');
+    if (!box) return;
+    const old = opts.id && box.querySelector('[data-id="' + opts.id + '"]');
+    const node = document.createElement('div');
+    node.className = 'toast ' + kind;
+    node.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+    if (opts.id) node.dataset.id = opts.id;
+    node.innerHTML = '<span class="toast-icon">' + (TOAST_ICONS[kind] || TOAST_ICONS.ok) + '</span><span class="toast-text"><span class="toast-title"></span><span class="toast-detail"></span></span>' +
+      '<button class="toast-close" aria-label="Close"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1 1l8 8M9 1L1 9"></path></svg></button>';
+    node.querySelector('.toast-title').textContent = title;
+    const d = node.querySelector('.toast-detail');
+    if (detail) d.textContent = detail; else d.remove();
+    if (detail) node.title = detail;
+    node.querySelector('.toast-close').addEventListener('click', () => dismissToast(node));
+    const ms = kind === 'error' ? 8000 : 4000;
+    const arm = () => { if (!opts.sticky) toastTimers.set(node, setTimeout(() => dismissToast(node), ms)); };
+    node.addEventListener('mouseenter', () => clearTimeout(toastTimers.get(node)));
+    node.addEventListener('mouseleave', arm);
+    if (old) { clearTimeout(toastTimers.get(old)); old.replaceWith(node); node.style.animation = 'none'; } else box.prepend(node);
+    arm();
+    [...box.querySelectorAll('.toast:not(.leaving)')].slice(TOAST_MAX).forEach(dismissToast);
   }
 
   // ---------- play order ----------
@@ -184,6 +223,9 @@
   // the queue runs out.
 
   let userQueue = []; // tracks waiting to play, in order
+  // A removed song still playing as a one-off: the playlist's current song
+  // (idx) is then the next one to play, not one already played.
+  let carryOn = null;
 
   const playable = (t) => !(t[3] && blocked.has(t[3]));
 
@@ -197,6 +239,7 @@
     if (auto && !ignoreRepeatOne && state.repeat === 'one' && playable(nowTrack())) return { repeat: true };
     while (userQueue.length && !playable(userQueue[0])) userQueue.shift();
     if (userQueue.length) return { queue: true };
+    if (state.qTrack && state.qTrack === carryOn && playable(DATA[state.plId].tracks[state.idx])) return { idx: state.idx };
     const [j] = walk(1, 1, !auto || state.repeat === 'all');
     if (j != null) return { idx: j };
     // After a queued song the playlist's own song is next, even if it's the only one.
@@ -206,6 +249,7 @@
 
   // Apply a move to the state (no player calls) and return the new song.
   function applyMove(m) {
+    if (!(m && m.repeat)) carryOn = null;
     if (m && m.repeat) setState({ pos: 0 });
     else if (m && m.queue) setState({ qTrack: userQueue.shift(), pos: 0, pick: null });
     else if (m) setState({ qTrack: null, idx: m.idx, pos: 0, pick: null });
@@ -264,14 +308,14 @@
   function sleepNow() {
     setState({ sleep: null, playing: false });
     if (nowTrack()[3]) yt.player.pause(SLEEP_FADE_MS);
-    notify('Sleep timer: music stopped.');
+    notify('Sleep timer', 'Music stopped.', 'info');
   }
 
   // A song played to the end: the sleep timer may stop here, otherwise move on.
   function songEnded() {
     if (state.sleep && state.sleep.end) {
       setState({ sleep: null, playing: false, pos: 0 });
-      notify('Sleep timer: music stopped.');
+      notify('Sleep timer', 'Music stopped.', 'info');
       return;
     }
     advance();
@@ -292,34 +336,179 @@
 
   function enqueue(track, next) {
     if (next) userQueue.unshift(track); else userQueue.push(track);
-    notify((next ? 'Playing next: ' : 'Added to queue: ') + track[0]);
+    notify(next ? 'Playing next' : 'Added to queue', track[0]);
   }
 
-  // ---------- add to playlist ----------
-  // Your own YouTube playlists (Liked music isn't one you can add to). The
-  // song is added on YouTube and to the loaded copy, so no refresh is needed.
+  // ---------- changing playlists ----------
+  // Songs are changed on YouTube and in the loaded copy, so no refresh is
+  // needed. Changing the playlist that's playing keeps the play position
+  // (idx and order are track indexes, so they shift with the change).
 
   const ownPlaylists = () => (state.account ? DATA.filter((p) => p.id && p.id !== 'LM') : []);
+  // Each playlist keeps its own copy of a track, with its own item id (t[5]).
+  const entryOf = (track, itemId) => [...track.slice(0, 5), itemId || ''];
 
-  function addedLocally(p, track) {
-    p.tracks.push(track);
+  function insertTrack(p, track, at) {
+    p.tracks.splice(at, 0, track);
     if (DATA[state.plId] !== p) return;
-    if (state.shuffle) order.push(p.tracks.length - 1);
-    else order = playlistOrder(state.plId);
+    if (at <= state.idx) state.idx++;
+    if (state.shuffle) { order = order.map((j) => (j >= at ? j + 1 : j)); order.push(at); } else order = playlistOrder(state.plId);
+  }
+
+  // The playing playlist can't lose its last song (nothing would be current).
+  const isLastPlaying = (p) => DATA[state.plId] === p && p.tracks.length === 1;
+
+  // Removing the song that's playing lets it finish as a one-off (like a
+  // queued song); the playlist then carries on with the song after it in
+  // play order. Without one (it was last) it goes on from the song before.
+  function removeTrack(p, i) {
+    if (DATA[state.plId] === p) {
+      const shift = (j) => (j > i ? j - 1 : j);
+      if (i === state.idx) {
+        if (!state.qTrack) state.qTrack = p.tracks[i];
+        const k = order.indexOf(i), after = order[k + 1];
+        state.idx = after != null ? shift(after) : shift(order[k - 1] != null ? order[k - 1] : 0);
+        carryOn = after != null ? state.qTrack : null;
+      } else if (i < state.idx) {
+        state.idx--;
+      }
+      p.tracks.splice(i, 1);
+      order = order.filter((j) => j !== i).map(shift);
+    } else {
+      p.tracks.splice(i, 1);
+    }
+    if (!p.tracks.length) dropPlaylist(DATA.indexOf(p));
+  }
+
+  // An emptied playlist leaves the library (Groove doesn't list empty ones).
+  function dropPlaylist(k) {
+    DATA.splice(k, 1);
+    const patch = {};
+    if (state.plId > k) patch.plId = state.plId - 1;
+    const plId = patch.plId != null ? patch.plId : state.plId;
+    if (state.openId === k) { patch.openId = plId; if (state.view === 'list') patch.view = 'home'; }
+    else if (state.openId > k) patch.openId = state.openId - 1;
+    Object.assign(state, patch);
   }
 
   async function addToPlaylist(track, p) {
-    if (p.tracks.some((t) => t[3] === track[3])) { notify('Already in ' + p.name + ': ' + track[0]); return; }
+    if (p.tracks.some((t) => t[3] === track[3])) { notify('Already in ' + p.name, track[0], 'info'); return; }
+    let itemId;
     try {
-      await yt.addToPlaylist(p.id, track[3]);
+      itemId = await yt.addToPlaylist(p.id, track[3]);
     } catch (e) {
-      notify("Couldn't add to " + p.name + ': ' + e.message);
+      notify('Couldn’t add to ' + p.name, e.message, 'error');
       return;
     }
     if (!DATA.includes(p)) return; // library reloaded meanwhile
-    addedLocally(p, track);
-    notify('Added to ' + p.name + ': ' + track[0]);
+    insertTrack(p, entryOf(track, itemId), p.tracks.length);
+    notify('Added to ' + p.name, track[0]);
     render();
+  }
+
+  async function removeFromPlaylist(p, track) {
+    if (p.id === 'LM') { toggleLike(track); return; }
+    if (isLastPlaying(p)) { notify('Can’t remove the last song', 'It’s playing from ' + p.name + '. Play another playlist first.', 'error'); return; }
+    try {
+      await yt.removeFromPlaylist(p.id, track[3], track[5]);
+    } catch (e) {
+      notify('Couldn’t remove from ' + p.name, e.message, 'error');
+      return;
+    }
+    const i = p.tracks.indexOf(track); // the list may have changed meanwhile
+    if (!DATA.includes(p) || i < 0) return;
+    if (isLastPlaying(p)) { render(); return; } // gone on YouTube; vanishes here on the next refresh
+    removeTrack(p, i);
+    notify('Removed from ' + p.name, track[0]);
+    render();
+  }
+
+  // ---------- likes ----------
+  // A song is liked when it's in Liked music. Liking puts it at the top, the
+  // way YouTube Music lists it; unliking takes it out.
+
+  const likedPlaylist = () => DATA.find((p) => p.id === 'LM');
+  const canLike = (t) => !!(state.account && t && t[3]);
+  const liking = new Set(); // video ids with a rating on its way
+  let likedIds = { tracks: null, n: -1, ids: new Set() };
+
+  function isLiked(t) {
+    const lm = likedPlaylist();
+    if (!lm || !t || !t[3]) return false;
+    if (likedIds.tracks !== lm.tracks || likedIds.n !== lm.tracks.length) likedIds = { tracks: lm.tracks, n: lm.tracks.length, ids: new Set(lm.tracks.map((x) => x[3])) };
+    return likedIds.ids.has(t[3]);
+  }
+
+  async function toggleLike(track) {
+    if (!canLike(track) || liking.has(track[3])) return;
+    const like = !isLiked(track);
+    let lm = likedPlaylist();
+    if (!like && isLastPlaying(lm)) { notify('Can’t remove the last song', 'It’s playing from Liked music. Play another playlist first.', 'error'); return; }
+    liking.add(track[3]);
+    render();
+    try {
+      await yt.rate(track[3], like);
+    } catch (e) {
+      notify(like ? 'Couldn’t like this song' : 'Couldn’t unlike this song', e.message, 'error');
+      return;
+    } finally {
+      liking.delete(track[3]);
+      render();
+    }
+    lm = likedPlaylist();
+    if (like && !isLiked(track)) {
+      if (!lm) {
+        lm = { id: 'LM', name: 'Liked music', color: PL_COLORS[0], tracks: [], cover: null };
+        DATA.unshift(lm);
+        state.plId++;
+        state.openId++;
+      }
+      insertTrack(lm, entryOf(track), 0);
+    } else if (!like && lm) {
+      const i = lm.tracks.findIndex((t) => t[3] === track[3]);
+      if (i >= 0 && !isLastPlaying(lm)) removeTrack(lm, i);
+    }
+    notify(like ? 'Added to Liked music' : 'Removed from Liked music', track[0], like ? 'like' : 'ok');
+    render();
+  }
+
+  // ---------- recently played ----------
+  // YouTube songs that played for 10 seconds or more, newest first, kept on
+  // this computer. A song played again moves back to the top.
+
+  const RECENT_KEY = 'bside.recent';
+  const RECENT_MAX = 50;
+  const RECENT_SHOWN = 5;
+  const trackKey = (t) => t[3] || t[0] + '\n' + t[1];
+  let recent = (() => {
+    try {
+      const r = JSON.parse(localStorage.getItem(RECENT_KEY));
+      return Array.isArray(r) ? r.filter((x) => x && Array.isArray(x.t) && x.t[3]) : [];
+    } catch (e) { return []; }
+  })();
+  let recentNoted = recent.length ? trackKey(recent[0].t) : '';
+  let recentAll = false;
+
+  function saveRecent() {
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify(recent)); } catch (e) { /* storage unavailable */ }
+  }
+
+  function noteRecent() {
+    const t = nowTrack();
+    if (!state.playing || state.pos < 10 || !t || !t[3] || trackKey(t) === recentNoted) return;
+    recentNoted = trackKey(t);
+    recent = [{ t: t.slice(0, 5), at: Date.now() }, ...recent.filter((r) => trackKey(r.t) !== recentNoted)].slice(0, RECENT_MAX);
+    saveRecent();
+  }
+
+  function ago(at) {
+    const m = Math.floor((Date.now() - at) / 60000);
+    if (m < 1) return 'Just now';
+    if (m < 60) return m + ' min ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+    const d = Math.floor(h / 24);
+    return d === 1 ? 'Yesterday' : d + ' days ago';
   }
 
   async function addToNewPlaylist(track, name) {
@@ -328,19 +517,20 @@
       const made = await yt.createPlaylist(name);
       p = { id: made.id, name: made.name, color: PL_COLORS[DATA.length % PL_COLORS.length], tracks: [], cover: null };
     } catch (e) {
-      notify("Couldn't make the playlist: " + e.message);
+      notify('Couldn’t make the playlist', e.message, 'error');
       return;
     }
     DATA.push(p);
+    let itemId;
     try {
-      await yt.addToPlaylist(p.id, track[3]);
+      itemId = await yt.addToPlaylist(p.id, track[3]);
     } catch (e) {
-      notify('Made “' + p.name + '” but couldn’t add the song: ' + e.message);
+      notify('Made “' + p.name + '” but couldn’t add the song', e.message, 'error');
       render();
       return;
     }
-    if (DATA.includes(p)) addedLocally(p, track);
-    notify('Made “' + p.name + '” with ' + track[0]);
+    if (DATA.includes(p)) insertTrack(p, entryOf(track, itemId), p.tracks.length);
+    notify('Made “' + p.name + '”', 'Added ' + track[0]);
     render();
   }
 
@@ -463,10 +653,11 @@
     const m = nextMove(true, true);
     if (!m || (m.idx === state.idx && !state.qTrack)) {
       setState({ playing: false });
-      notify(state.qTrack ? 'Skipped “' + t[0] + '”: it ' + (PLAY_ERRORS[code] || "couldn't be played") + '.' : 'None of the songs in this playlist can be played here.');
+      if (state.qTrack) notify('Skipped “' + t[0] + '”', 'It ' + (PLAY_ERRORS[code] || 'couldn’t be played') + '.', 'error');
+      else notify('Nothing here can play', 'None of the songs in this playlist can be played here.', 'error');
       return;
     }
-    notify('Skipped “' + t[0] + '”: it ' + (PLAY_ERRORS[code] || "couldn't be played") + '.');
+    notify('Skipped “' + t[0] + '”', 'It ' + (PLAY_ERRORS[code] || 'couldn’t be played') + '.', 'error');
     advance(m);
   }
 
@@ -487,7 +678,7 @@
 
   async function connectYouTube() {
     setState({ ytError: '' });
-    if (yt.signInInBrowser) notify('Finish signing in to Google in your browser.');
+    if (yt.signInInBrowser) notify('Finish signing in', 'Google opened in your browser.', 'info');
     try {
       await yt.signIn();
     } catch (e) {
@@ -831,7 +1022,8 @@
 
     stage: el('stage'), stageInner: el('stage-inner'),
     playerCover: el('player-cover'), playerCoverTitle: el('player-cover-title'), playerCoverArtist: el('player-cover-artist'),
-    playerTitle: el('player-title'), playerArtist: el('player-artist'),
+    playerTitle: el('player-title'), playerArtist: el('player-artist'), playerLike: el('player-like'), miniLike: el('mini-like'), playerAdd: el('player-add'), miniAdd: el('mini-add'),
+    recentSection: el('recent-section'), recentRows: el('recent-rows'), recentMore: el('recent-more'), recentClear: el('recent-clear'),
 
     disc: el('disc'), discLabel: el('disc-label'), discTitle: el('disc-title'), discArtist: el('disc-artist'), discRpm: el('disc-rpm'),
     tonearm: el('tonearm'), stylusStripe: el('stylus-stripe'),
@@ -939,7 +1131,10 @@
 
   // ---------- render ----------
 
+  let pageUnderPlayer = null; // { key, view, scroll }
+
   function render() {
+    noteRecent();
     const v = computeVals();
 
     document.body.style.setProperty('--accent', v.accent);
@@ -962,8 +1157,15 @@
     renderAccount();
 
     // view switching (a new page starts at the top)
+    // Opening the player remembers the page under it (and where it was
+    // scrolled), so lowering the player goes back there.
     const pageKey = state.view + ':' + state.openId;
-    if (refs.scroller.dataset.page !== pageKey) { refs.scroller.dataset.page = pageKey; refs.scroller.scrollTop = 0; }
+    if (refs.scroller.dataset.page !== pageKey) {
+      const from = refs.scroller.dataset.page;
+      if (state.view === 'player' && from && !from.startsWith('player:')) pageUnderPlayer = { key: from, view: from.split(':')[0], scroll: refs.scroller.scrollTop };
+      refs.scroller.dataset.page = pageKey;
+      refs.scroller.scrollTop = pageUnderPlayer && pageUnderPlayer.key === pageKey && from && from.startsWith('player:') ? pageUnderPlayer.scroll : 0;
+    }
     refs.viewHome.classList.toggle('active', v.isHome);
     refs.viewList.classList.toggle('active', v.isList);
     refs.viewCrate.classList.toggle('active', v.isCrate);
@@ -978,6 +1180,7 @@
     renderLyrics();
     renderSearch();
     renderMinibar(v);
+    renderLike();
     const back = canGoBack();
     [refs.btnPrev, refs.miniPrev, refs.compactPrev].forEach((b) => { b.disabled = !back; });
     renderSettings(v);
@@ -1393,8 +1596,9 @@
 
   // ---------- song menu (right-click or ⋯) ----------
 
-  function openMenu(x, y, track, play) {
-    setState({ menu: { x, y, track, play } });
+  // `from`: the playlist index the song was picked in, for "Remove from this playlist".
+  function openMenu(x, y, track, play, from, page) {
+    setState({ menu: { x, y, track, play, from, page } });
   }
 
   function renderMenu() {
@@ -1402,7 +1606,7 @@
     refs.songMenu.classList.toggle('hidden', !m);
     if (!m) return;
     // `m.page`: the main list, your playlists, or naming a new one.
-    rebuild(refs.songMenu, JSON.stringify([m.track, !!m.play, m.page || '']), () => {
+    rebuild(refs.songMenu, JSON.stringify([m.track, !!m.play, m.page || '', m.from, isLiked(m.track), DATA.length]), () => {
       const item = (text, run, opts = {}) => {
         const b = document.createElement('button');
         b.textContent = text;
@@ -1445,6 +1649,11 @@
         item('Play next', () => enqueue(m.track, true));
         item('Add to queue', () => enqueue(m.track, false));
         if (state.account && m.track[3]) page('playlists', 'Add to playlist…');
+        if (canLike(m.track)) item(isLiked(m.track) ? 'Remove from Liked music' : 'Add to Liked music', () => toggleLike(m.track));
+        const from = DATA[m.from];
+        if (state.account && from && from.id && from.id !== 'LM' && from.tracks.includes(m.track)) {
+          item('Remove from this playlist', () => removeFromPlaylist(from, m.track), { cls: 'menu-danger' });
+        }
       }
     });
     // Keep it on screen.
@@ -1461,8 +1670,16 @@
     refs.compactToggle.innerHTML = v.playing ? PAUSE_ICON_SM : PLAY_ICON_SM;
   }
 
+  let shownYtError = '';
+
   function renderAccount() {
-    const key = JSON.stringify([state.account, state.syncing, state.ytError, state.notice]);
+    // A YouTube problem (sign-in, library) shows as an error toast until it clears.
+    if (state.ytError !== shownYtError) {
+      shownYtError = state.ytError;
+      if (state.ytError) notify('YouTube Music', state.ytError, 'error', { id: 'yt-error', sticky: true });
+      else dismissToast(document.querySelector('[data-id="yt-error"]'));
+    }
+    const key = JSON.stringify([state.account, state.syncing]);
     rebuild(refs.topbarRight, key, () => {
       const add = (tag, cls, text) => {
         const n = document.createElement(tag);
@@ -1471,14 +1688,39 @@
         refs.topbarRight.appendChild(n);
         return n;
       };
-      if (state.ytError) add('span', 'yt-error', state.ytError);
-      if (state.notice) add('span', 'yt-notice', state.notice);
       if (state.syncing) add('span', '', 'Syncing YouTube Music…');
       else if (!state.account) add('button', 'yt-connect', 'Connect YouTube Music').onclick = connectYouTube;
     });
   }
 
+  function renderLike() {
+    const t = nowTrack(), on = isLiked(t), label = on ? 'Remove from Liked music' : 'Add to Liked music';
+    for (const b of [refs.playerLike, refs.miniLike]) {
+      b.classList.toggle('hidden', !canLike(t));
+      b.classList.toggle('on', on);
+      b.disabled = !!(t && liking.has(t[3]));
+      b.setAttribute('aria-pressed', String(on));
+      b.setAttribute('aria-label', label);
+      b.title = label;
+    }
+    const canAdd = !!(state.account && t && t[3]);
+    for (const b of [refs.playerAdd, refs.miniAdd]) b.classList.toggle('hidden', !canAdd);
+  }
+
+  function renderRecent() {
+    refs.recentSection.classList.toggle('hidden', !recent.length);
+    if (!recent.length) return;
+    const shown = recentAll ? recent : recent.slice(0, RECENT_SHOWN);
+    refs.recentMore.classList.toggle('hidden', recent.length <= RECENT_SHOWN);
+    refs.recentMore.textContent = recentAll ? 'Show less' : 'Show all ' + recent.length;
+    // Rebuilt each minute too, so "5 min ago" keeps up.
+    rebuild(refs.recentRows, JSON.stringify([shown.map((r) => [r.t[3], r.at]), Math.floor(Date.now() / 60000)]), () => shown.forEach((r) => {
+      refs.recentRows.appendChild(resultRow(r.t, trackArt(r.t, r.t[0].length).coverBg, ago(r.at), () => { playNow(r.t); setState({ view: 'player' }); }));
+    }));
+  }
+
   function renderHome(v) {
+    renderRecent();
     rebuild(refs.playlistsGrid, JSON.stringify(v.playlists), () => v.playlists.forEach((pl) => {
       const btn = document.createElement('button');
       btn.className = 'pl-tile';
@@ -1561,10 +1803,10 @@
       row.querySelector('.t-time').textContent = t.time;
       const track = DATA[state.openId].tracks[t.idx];
       row.addEventListener('click', (e) => {
-        if (e.target.closest('.t-more')) { const r = e.target.closest('.t-more').getBoundingClientRect(); openMenu(r.left, r.bottom + 4, track); return; }
+        if (e.target.closest('.t-more')) { const r = e.target.closest('.t-more').getBoundingClientRect(); openMenu(r.left, r.bottom + 4, track, null, state.openId); return; }
         actions.playTrack(state.openId, t.idx);
       });
-      row.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, track); });
+      row.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, track, null, state.openId); });
       refs.listRows.appendChild(row);
       });
     });
@@ -1716,12 +1958,23 @@
       setState({ search: { ...state.search, q: '' }, view: state.view === 'search' ? viewBeforeSearch : state.view });
     }
   });
-  refs.playerDismiss.addEventListener('click', actions.goHome);
+  // Lower the player onto the page it was opened from (Library if none).
+  refs.playerDismiss.addEventListener('click', () => setState({ view: pageUnderPlayer ? pageUnderPlayer.view : 'home' }));
   refs.playerLyrics.addEventListener('click', () => setPrefs({ lyrics: !state.lyrics }));
+  refs.playerLike.addEventListener('click', () => toggleLike(nowTrack()));
+  refs.miniLike.addEventListener('click', () => toggleLike(nowTrack()));
+  // Straight to the playlist picker for the song that's playing.
+  for (const b of [refs.playerAdd, refs.miniAdd]) b.addEventListener('click', () => {
+    if (state.menu) { setState({ menu: null }); return; } // a second click closes it
+    const r = b.getBoundingClientRect();
+    openMenu(r.left, r.bottom + 4, nowTrack(), null, null, 'playlists');
+  });
+  refs.recentMore.addEventListener('click', () => { recentAll = !recentAll; render(); });
+  refs.recentClear.addEventListener('click', () => { recent = []; recentAll = false; saveRecent(); render(); });
 
   // The song menu closes on any click outside it, Escape, scrolling or resizing.
   document.addEventListener('pointerdown', (e) => {
-    if (state.menu && !refs.songMenu.contains(e.target) && !e.target.closest('.t-more')) setState({ menu: null });
+    if (state.menu && !refs.songMenu.contains(e.target) && !e.target.closest('.t-more, .add-btn')) setState({ menu: null });
   });
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && state.menu) setState({ menu: null }); });
   refs.scroller.addEventListener('scroll', () => { if (state.menu) setState({ menu: null }); });
@@ -2122,7 +2375,7 @@
       else if (cmd === 'prev') actions.prev();
       else if (cmd === 'volup' || cmd === 'voldown') {
         actions.nudgeVolume(cmd === 'volup' ? 5 : -5);
-        notify('Volume ' + (state.muted ? 0 : state.volume));
+        notify('Volume ' + (state.muted ? 0 : state.volume), '', 'info', { id: 'volume' });
       }
     });
   }

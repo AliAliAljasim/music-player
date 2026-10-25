@@ -62,6 +62,14 @@
 
   <!-- HOME -->
   <main class="view view-home" id="view-home">
+    <section class="recent-section hidden" id="recent-section">
+      <div class="recent-head">
+        <h2>Recently played</h2>
+        <button class="recent-link" id="recent-more"></button>
+        <button class="recent-link" id="recent-clear">Clear</button>
+      </div>
+      <div class="result-rows" id="recent-rows"></div>
+    </section>
     <section class="playlists-section">
       <h1>Your playlists</h1>
       <div class="playlists-grid" id="playlists-grid"></div>
@@ -265,6 +273,10 @@
           <div class="player-meta">
             <span class="player-title" id="player-title"></span>
             <span class="player-artist" id="player-artist"></span>
+            <div class="player-actions">
+              <button class="like-btn hidden" id="player-like" aria-pressed="false" aria-label="Add to Liked music" title="Add to Liked music"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"></path></svg></button>
+              <button class="like-btn add-btn hidden" id="player-add" aria-label="Add to playlist" title="Add to playlist"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h12M4 11h12M4 16h7M18 13v8M14 17h8"></path></svg></button>
+            </div>
           </div>
         </div>
 
@@ -342,6 +354,9 @@
 
   </div>
 
+  <!-- TOASTS: short confirmations and errors, top right -->
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
   <!-- MINI BAR -->
   <div class="minibar" id="minibar">
     <div class="minibar-seek" id="minibar-seek">
@@ -358,6 +373,8 @@
           <span class="minibar-artist" id="minibar-artist"></span>
         </span>
       </button>
+      <button class="ctrl-btn like-btn hidden" id="mini-like" aria-pressed="false" aria-label="Add to Liked music" title="Add to Liked music"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 20s-7.5-4.6-7.5-10.2A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6C19.5 15.4 12 20 12 20z"></path></svg></button>
+      <button class="ctrl-btn like-btn add-btn hidden" id="mini-add" aria-label="Add to playlist" title="Add to playlist"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h12M4 11h12M4 16h7M18 13v8M14 17h8"></path></svg></button>
       <span class="mono minibar-time" id="minibar-time"></span>
       <button class="ctrl-btn" id="mini-prev" aria-label="Previous">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#EEE8DF" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 5v14"></path><path d="M19 5l-10 7 10 7z"></path></svg>

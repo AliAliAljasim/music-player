@@ -99,12 +99,12 @@ window.BSideYouTube = (() => {
     stopAll();
   }
 
-  // GET, or POST when there's a body.
-  async function api(path, params, body) {
+  // GET, or POST when there's a body; `method` overrides (POST without a body, DELETE).
+  async function api(path, params, body, method) {
     let value = await accessToken(false);
     if (!value) throw new Error('Not signed in to YouTube.');
     const send = (v) => fetch(API + path + '?' + new URLSearchParams(params), {
-      method: body ? 'POST' : 'GET',
+      method: method || (body ? 'POST' : 'GET'),
       headers: { Authorization: 'Bearer ' + v, ...(body ? { 'Content-Type': 'application/json' } : {}) },
       body: body ? JSON.stringify(body) : undefined
     });
@@ -115,7 +115,8 @@ window.BSideYouTube = (() => {
       session = false;
       throw new Error('Your YouTube session expired. Connect again.');
     }
-    const j = await r.json();
+    const text = await r.text(); // rating and deleting answer with no content
+    const j = text ? JSON.parse(text) : {};
     if (!r.ok) {
       const msg = (j.error && j.error.message) || 'YouTube API error ' + r.status;
       // A session from before Groove could change playlists (read-only).
@@ -188,13 +189,13 @@ window.BSideYouTube = (() => {
     return pages.flatMap((j) => j.items || []);
   }
 
+  // Each track also carries its playlist item id (t[5]), which removing it needs.
   async function playlistTracks(id, keep = isMusic) {
     const items = await allItems('playlistItems', { part: 'contentDetails', playlistId: id });
-    const ids = items.map((i) => i.contentDetails.videoId);
-    if (!ids.length) return [];
+    if (!items.length) return [];
     // Deleted, private and filtered-out videos drop out here; keep the playlist's order.
-    const byId = new Map((await videoDetails(ids)).filter(keep).map((v) => [v.id, v]));
-    return ids.filter((i) => byId.has(i)).map((i) => trackFromVideo(byId.get(i)));
+    const byId = new Map((await videoDetails(items.map((i) => i.contentDetails.videoId))).filter(keep).map((v) => [v.id, v]));
+    return items.filter((i) => byId.has(i.contentDetails.videoId)).map((i) => [...trackFromVideo(byId.get(i.contentDetails.videoId)), i.id]);
   }
 
   // YouTube Music's own "Liked music" playlist (LM) when the API exposes it;
@@ -240,9 +241,26 @@ window.BSideYouTube = (() => {
     return ids.filter((i) => byId.has(i)).map((i) => trackFromVideo(byId.get(i)));
   }
 
-  // Each insert costs 50 of the daily quota units.
+  // Each insert, delete or rating costs 50 of the daily quota units.
+  // Returns the new playlist item's id.
   async function addToPlaylist(playlistId, videoId) {
-    await api('playlistItems', { part: 'snippet' }, { snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } } });
+    const j = await api('playlistItems', { part: 'snippet' }, { snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } } });
+    return j.id || '';
+  }
+
+  // Without the item id (not known yet), the video's first entry in the playlist.
+  async function removeFromPlaylist(playlistId, videoId, itemId) {
+    if (!itemId) {
+      const j = await api('playlistItems', { part: 'id', playlistId, videoId, maxResults: 1 });
+      itemId = j.items && j.items[0] && j.items[0].id;
+      if (!itemId) return; // already gone
+    }
+    await api('playlistItems', { id: itemId }, null, 'DELETE');
+  }
+
+  // Like (adds it to Liked music) or clear the rating.
+  async function rate(videoId, liked) {
+    await api('videos/rate', { id: videoId, rating: liked ? 'like' : 'none' }, null, 'POST');
   }
 
   async function createPlaylist(title) {
@@ -260,7 +278,7 @@ window.BSideYouTube = (() => {
   // current one fades out. Only the active deck reports state, time and
   // errors. Each deck plays at the master volume times its own fade gain.
 
-  const PLAYING = 1, PAUSED = 2, BUFFERING = 3, ENDED = 0;
+  const PLAYING = 1, PAUSED = 2, BUFFERING = 3, ENDED = 0, CUED = 5;
   // A skip fades the outgoing track quickly rather than waiting out the full fade.
   const SKIP_FADE_MAX = 800;
 
@@ -270,6 +288,9 @@ window.BSideYouTube = (() => {
   let ready = false;
   let playerReady = null;
   let loadSeq = 0;
+  // While a new track loads (fading the old one out, then buffering), the
+  // player still reports the old track's time; report the new start instead.
+  let pendingStart = null;
   let onEnded = () => {};
   let onError = () => {};
   let onPlayState = () => {};
@@ -318,6 +339,7 @@ window.BSideYouTube = (() => {
 
   function stateChange(d, s) {
     if (d !== deck()) return;
+    if (s === PLAYING || s === CUED) pendingStart = null;
     if (s === PLAYING) {
       if (d.fadeIn) { ramp(d, 1, d.fadeIn); d.fadeIn = 0; }
       if (d.fadeOther) { fadeOutAndStop(other(), d.fadeOther); d.fadeOther = 0; }
@@ -341,7 +363,7 @@ window.BSideYouTube = (() => {
               events: {
                 onReady: () => { apply(d); if (++n === decks.length) { ready = true; resolve(); } },
                 onStateChange: (e) => stateChange(d, e.data),
-                onError: (e) => { if (d === deck()) onError(e.data); }
+                onError: (e) => { if (d === deck()) { pendingStart = null; onError(e.data); } }
               }
             });
           });
@@ -355,6 +377,7 @@ window.BSideYouTube = (() => {
   async function load(videoId, start, autoplay, fadeMs) {
     await ensurePlayer();
     const seq = ++loadSeq;
+    pendingStart = start || 0;
     const d = deck();
     const quick = Math.min(fadeMs, SKIP_FADE_MAX);
     fadeOutAndStop(other(), quick);
@@ -373,6 +396,7 @@ window.BSideYouTube = (() => {
   async function crossfade(videoId, ms) {
     await ensurePlayer();
     ++loadSeq;
+    pendingStart = 0;
     active = 1 - active;
     const d = deck();
     if (d.ramp) d.ramp.cancel();
@@ -418,7 +442,7 @@ window.BSideYouTube = (() => {
     configured: viaApp || !!clientId,
     // Desktop sign-in finishes in the system browser rather than a popup.
     signInInBrowser: viaApp,
-    signedIn, signIn, signOut, profile, library, search, addToPlaylist, createPlaylist, ensurePlayer,
+    signedIn, signIn, signOut, profile, library, search, addToPlaylist, removeFromPlaylist, rate, createPlaylist, ensurePlayer,
     onEnded: (fn) => { onEnded = fn; },
     onError: (fn) => { onError = fn; },
     // Playing/paused as the player reports it, including changes made outside
@@ -428,8 +452,8 @@ window.BSideYouTube = (() => {
     player: {
       load, crossfade, play, pause,
       seek: (s) => { if (ready) deck().player.seekTo(s, true); },
-      time: () => (ready ? deck().player.getCurrentTime() || 0 : 0),
-      duration: () => (ready ? deck().player.getDuration() || 0 : 0)
+      time: () => (pendingStart != null ? pendingStart : ready ? deck().player.getCurrentTime() || 0 : 0),
+      duration: () => (pendingStart == null && ready ? deck().player.getDuration() || 0 : 0)
     }
   };
 })();
