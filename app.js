@@ -295,6 +295,55 @@
     notify((next ? 'Playing next: ' : 'Added to queue: ') + track[0]);
   }
 
+  // ---------- add to playlist ----------
+  // Your own YouTube playlists (Liked music isn't one you can add to). The
+  // song is added on YouTube and to the loaded copy, so no refresh is needed.
+
+  const ownPlaylists = () => (state.account ? DATA.filter((p) => p.id && p.id !== 'LM') : []);
+
+  function addedLocally(p, track) {
+    p.tracks.push(track);
+    if (DATA[state.plId] !== p) return;
+    if (state.shuffle) order.push(p.tracks.length - 1);
+    else order = playlistOrder(state.plId);
+  }
+
+  async function addToPlaylist(track, p) {
+    if (p.tracks.some((t) => t[3] === track[3])) { notify('Already in ' + p.name + ': ' + track[0]); return; }
+    try {
+      await yt.addToPlaylist(p.id, track[3]);
+    } catch (e) {
+      notify("Couldn't add to " + p.name + ': ' + e.message);
+      return;
+    }
+    if (!DATA.includes(p)) return; // library reloaded meanwhile
+    addedLocally(p, track);
+    notify('Added to ' + p.name + ': ' + track[0]);
+    render();
+  }
+
+  async function addToNewPlaylist(track, name) {
+    let p;
+    try {
+      const made = await yt.createPlaylist(name);
+      p = { id: made.id, name: made.name, color: PL_COLORS[DATA.length % PL_COLORS.length], tracks: [], cover: null };
+    } catch (e) {
+      notify("Couldn't make the playlist: " + e.message);
+      return;
+    }
+    DATA.push(p);
+    try {
+      await yt.addToPlaylist(p.id, track[3]);
+    } catch (e) {
+      notify('Made “' + p.name + '” but couldn’t add the song: ' + e.message);
+      render();
+      return;
+    }
+    if (DATA.includes(p)) addedLocally(p, track);
+    notify('Made “' + p.name + '” with ' + track[0]);
+    render();
+  }
+
   // ---------- YouTube ----------
   // Tracks from YouTube carry a video id (t[3]); mirror state onto the player.
   // Sample tracks have none, so the simulated clock keeps driving them.
@@ -438,6 +487,7 @@
 
   async function connectYouTube() {
     setState({ ytError: '' });
+    if (yt.signInInBrowser) notify('Finish signing in to Google in your browser.');
     try {
       await yt.signIn();
     } catch (e) {
@@ -1252,7 +1302,7 @@
     row.className = 'result-row' + (playable(track) ? '' : ' blocked');
     row.innerHTML = '<span class="r-cover"></span><span class="r-meta"><span class="r-title"></span><span class="r-artist"></span></span>' +
       '<span class="r-from"></span><span class="r-time"></span>' +
-      '<span class="t-more" role="button" tabindex="0" aria-label="More" title="Play next / Add to queue">' + MORE_ICON + '</span>';
+      '<span class="t-more" role="button" tabindex="0" aria-label="More" title="More">' + MORE_ICON + '</span>';
     row.querySelector('.r-cover').style.background = cover;
     row.querySelector('.r-title').textContent = track[0];
     row.querySelector('.r-artist').textContent = track[1];
@@ -1351,16 +1401,51 @@
     const m = state.menu;
     refs.songMenu.classList.toggle('hidden', !m);
     if (!m) return;
-    rebuild(refs.songMenu, JSON.stringify([m.track, !!m.play]), () => {
-      const item = (text, run) => {
+    // `m.page`: the main list, your playlists, or naming a new one.
+    rebuild(refs.songMenu, JSON.stringify([m.track, !!m.play, m.page || '']), () => {
+      const item = (text, run, opts = {}) => {
         const b = document.createElement('button');
         b.textContent = text;
-        b.addEventListener('click', () => { setState({ menu: null }); run(); });
-        refs.songMenu.appendChild(b);
+        if (opts.cls) b.className = opts.cls;
+        if (opts.title) b.title = opts.title;
+        b.addEventListener('click', () => { if (!opts.stay) setState({ menu: null }); run(); });
+        (opts.into || refs.songMenu).appendChild(b);
       };
-      if (m.play) item('Play', m.play);
-      item('Play next', () => enqueue(m.track, true));
-      item('Add to queue', () => enqueue(m.track, false));
+      const page = (to, text, cls) => item(text, () => setState({ menu: { ...m, page: to } }), { cls, stay: true });
+      refs.songMenu.classList.toggle('picking', !!m.page);
+      if (m.page === 'playlists') {
+        page(null, '‹ Add to playlist', 'menu-back');
+        const list = document.createElement('div');
+        list.className = 'menu-list';
+        refs.songMenu.appendChild(list);
+        ownPlaylists().forEach((p) => item(p.name, () => addToPlaylist(m.track, p), { into: list, title: p.name }));
+        page('new', '+ New playlist…', 'menu-new');
+      } else if (m.page === 'new') {
+        page('playlists', '‹ New playlist', 'menu-back');
+        const form = document.createElement('form');
+        form.className = 'menu-form';
+        const input = document.createElement('input');
+        input.placeholder = 'Playlist name';
+        input.maxLength = 150;
+        input.setAttribute('aria-label', 'Playlist name');
+        const go = document.createElement('button');
+        go.textContent = 'Create';
+        form.append(input, go);
+        form.addEventListener('submit', (e) => {
+          e.preventDefault();
+          const name = input.value.trim();
+          if (!name) return;
+          setState({ menu: null });
+          addToNewPlaylist(m.track, name);
+        });
+        refs.songMenu.appendChild(form);
+        setTimeout(() => input.focus());
+      } else {
+        if (m.play) item('Play', m.play);
+        item('Play next', () => enqueue(m.track, true));
+        item('Add to queue', () => enqueue(m.track, false));
+        if (state.account && m.track[3]) page('playlists', 'Add to playlist…');
+      }
     });
     // Keep it on screen.
     const w = refs.songMenu.offsetWidth, h = refs.songMenu.offsetHeight;
@@ -1460,7 +1545,7 @@
         '<span class="t-title"></span>' +
         '<span class="t-artist"></span>' +
         '<span class="t-time"></span>' +
-        '<span class="t-more" role="button" tabindex="0" aria-label="More" title="Play next / Add to queue">' + MORE_ICON + '</span>';
+        '<span class="t-more" role="button" tabindex="0" aria-label="More" title="More">' + MORE_ICON + '</span>';
       const numCell = row.querySelector('.num-cell');
       numCell.style.color = t.numColor;
       if (t.showNow) {

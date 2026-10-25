@@ -2,7 +2,8 @@
 // Electron shell for Groove. The page has to load from http://localhost:8000:
 // that is the origin registered with Google OAuth, and the YouTube player
 // refuses to embed from file://. So the app serves its own files there.
-const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, screen, shell, webFrameMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, globalShortcut, ipcMain, nativeImage, safeStorage, screen, shell, webFrameMain } = require('electron');
+const crypto = require('crypto');
 const { autoUpdater } = require('electron-updater');
 const http = require('http');
 const { spawn } = require('child_process');
@@ -193,6 +194,184 @@ const SHORTCUTS = [
   ['CommandOrControl+Alt+Up', 'volup'],
   ['CommandOrControl+Alt+Down', 'voldown']
 ];
+// Taskbar thumbnail button icons, drawn as white polygons on a 16-unit grid
+// (Windows can't use SVG here, and this saves shipping PNGs).
+const THUMB_SHAPES = {
+  prev: [[[3, 3], [5, 3], [5, 13], [3, 13]], [[13, 3], [13, 13], [6, 8]]],
+  next: [[[11, 3], [13, 3], [13, 13], [11, 13]], [[3, 3], [10, 8], [3, 13]]],
+  play: [[[4, 2.5], [13, 8], [4, 13.5]]],
+  pause: [[[4, 3], [7, 3], [7, 13], [4, 13]], [[9, 3], [12, 3], [12, 13], [9, 13]]]
+};
+const thumbIcons = {};
+function thumbIcon(name) {
+  if (thumbIcons[name]) return thumbIcons[name];
+  const size = 32, k = size / 16, ss = 4;
+  const inside = (poly, x, y) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+  const buf = Buffer.alloc(size * size * 4);
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      let hits = 0;
+      for (let sy = 0; sy < ss; sy++) {
+        for (let sx = 0; sx < ss; sx++) {
+          const x = (px + (sx + 0.5) / ss) / k, y = (py + (sy + 0.5) / ss) / k;
+          if (THUMB_SHAPES[name].some((poly) => inside(poly, x, y))) hits++;
+        }
+      }
+      // Premultiplied BGRA, so white at partial coverage is a grey value.
+      buf.fill(Math.round(255 * hits / (ss * ss)), (py * size + px) * 4, (py * size + px) * 4 + 4);
+    }
+  }
+  return (thumbIcons[name] = nativeImage.createFromBitmap(buf, { width: size, height: size, scaleFactor: 2 }));
+}
+
+// ---------- Google sign-in ----------
+// Desktop-app OAuth: Google's page opens in the system browser and redirects
+// back to a one-off server on 127.0.0.1 (authorization code + PKCE). Unlike
+// the page's own browser sign-in, this gets a refresh token, kept encrypted
+// with safeStorage, so the access token (good for an hour) is renewed here
+// and you stay signed in. oauth.json comes from .env via build-config.sh.
+const OAUTH = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'oauth.json'), 'utf8')); } catch (e) { return {}; }
+})();
+// Read and write: reading the library and adding songs to playlists.
+const YT_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl';
+const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
+
+const authPage = (text) => '<!doctype html><meta charset="utf-8"><title>Groove</title>' +
+  '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#131211;color:#EDE6DA;font:16px system-ui,sans-serif">' +
+  '<p>' + text + '</p>';
+
+function setupAuth(win, showWindow) {
+  const file = path.join(app.getPath('userData'), 'google-session');
+  let refresh = null; // null until read from disk; '' when signed out
+  let access = null; // { value, exp }
+  let renewing = null;
+  let pending = null;
+
+  const saved = () => {
+    if (refresh === null) {
+      try { refresh = safeStorage.decryptString(fs.readFileSync(file)); } catch (e) { refresh = ''; }
+    }
+    return refresh;
+  };
+  const store = (t) => {
+    refresh = t || '';
+    // Without OS encryption the session lasts until Groove closes.
+    try {
+      if (t && safeStorage.isEncryptionAvailable()) fs.writeFileSync(file, safeStorage.encryptString(t));
+      else fs.rmSync(file, { force: true });
+    } catch (e) { /* keep it in memory */ }
+  };
+
+  async function tokenRequest(params) {
+    const r = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: OAUTH.clientId, client_secret: OAUTH.clientSecret, ...params })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw Object.assign(new Error(j.error_description || j.error || 'Google sign-in failed (' + r.status + ')'), { code: j.error });
+    // Google's consent page lets you untick the YouTube permission.
+    if (j.scope && !j.scope.split(' ').includes(YT_SCOPE)) {
+      throw new Error('Groove needs access to your YouTube account. Connect again and tick the YouTube box.');
+    }
+    if (j.refresh_token) store(j.refresh_token);
+    access = { value: j.access_token, exp: Date.now() + Number(j.expires_in) * 1000 };
+    return access;
+  }
+
+  // A valid access token, renewed when (nearly) expired or `force`d. null
+  // when signed out, or when Google no longer accepts the session.
+  function token(force) {
+    if (!force && access && access.exp > Date.now() + 60000) return Promise.resolve(access);
+    if (!saved()) return Promise.resolve(null);
+    if (!renewing) {
+      renewing = tokenRequest({ grant_type: 'refresh_token', refresh_token: refresh })
+        .catch((e) => { if (e.code !== 'invalid_grant') throw e; store(''); access = null; return null; })
+        .finally(() => { renewing = null; });
+    }
+    return renewing;
+  }
+
+  function signIn() {
+    if (pending) pending(new Error('Sign-in was restarted.'));
+    return new Promise((resolve, reject) => {
+      const verifier = crypto.randomBytes(32).toString('base64url');
+      const nonce = crypto.randomBytes(16).toString('hex');
+      let redirect = '';
+      let timer = null;
+      const finish = (err, val) => {
+        if (pending !== finish) return;
+        pending = null;
+        clearTimeout(timer);
+        server.close();
+        if (err) reject(err); else resolve(val);
+      };
+      pending = finish;
+      const server = http.createServer(async (req, res) => {
+        const q = new URL(req.url, 'http://127.0.0.1').searchParams;
+        if (q.get('state') !== nonce) { res.writeHead(404); return res.end(); }
+        const code = q.get('code');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(authPage(code ? 'Signed in. You can close this tab and go back to Groove.' : 'Sign-in was cancelled. You can close this tab.'));
+        showWindow();
+        if (!code) return finish(new Error(q.get('error') === 'access_denied' ? 'Sign-in was cancelled.' : 'Sign-in failed: ' + q.get('error')));
+        try {
+          finish(null, await tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirect }));
+        } catch (e) { finish(e); }
+      });
+      server.once('error', (e) => finish(e));
+      server.listen(0, '127.0.0.1', () => {
+        redirect = 'http://127.0.0.1:' + server.address().port;
+        timer = setTimeout(() => finish(new Error('Sign-in timed out. Try again.')), SIGN_IN_TIMEOUT_MS);
+        shell.openExternal('https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams({
+          client_id: OAUTH.clientId,
+          redirect_uri: redirect,
+          response_type: 'code',
+          scope: YT_SCOPE,
+          code_challenge: crypto.createHash('sha256').update(verifier).digest('base64url'),
+          code_challenge_method: 'S256',
+          state: nonce,
+          access_type: 'offline',
+          // Always ask, so Google always sends a refresh token.
+          prompt: 'consent'
+        }));
+      });
+    });
+  }
+
+  function signOut() {
+    if (pending) pending(new Error('Sign-in was cancelled.'));
+    const t = saved() || (access && access.value);
+    if (t) fetch('https://oauth2.googleapis.com/revoke', { method: 'POST', body: new URLSearchParams({ token: t }) }).catch(() => {});
+    store('');
+    access = null;
+  }
+
+  const configured = !!(OAUTH.clientId && OAUTH.clientSecret);
+  ipcMain.on('bside:auth-info', (e) => {
+    e.returnValue = e.sender === win.webContents && configured ? { configured, saved: !!saved() } : { configured: false };
+  });
+  // Errors come back as { error } so the page shows Google's message, not
+  // Electron's "Error invoking remote method" wrapper.
+  ipcMain.handle('bside:auth', async (e, action) => {
+    if (e.sender !== win.webContents || !configured) return { error: 'Sign-in is not set up.' };
+    try {
+      if (action === 'signin') return { token: await signIn() };
+      if (action === 'token' || action === 'renew') return { token: await token(action === 'renew') };
+      if (action === 'signout') { signOut(); return {}; }
+    } catch (err) { return { error: err.message }; }
+    return { error: 'Unknown sign-in action.' };
+  });
+}
+
 const LOGIN_ARGS = ['--from-login'];
 const fromLogin = process.argv.includes(LOGIN_ARGS[0]);
 let quitting = false;
@@ -224,9 +403,25 @@ function setupDesktop(win, ws, switchMode) {
     buildMenu();
     tray.on('click', showWindow);
   }
+  // Previous / play-pause / next under the taskbar preview. Windows drops
+  // them when the window is hidden, so they're set again on every show.
+  let thumbPlaying = null;
+  const setThumbar = (force) => {
+    if (process.platform !== 'win32' || win.isDestroyed() || (!force && thumbPlaying === now.playing)) return;
+    thumbPlaying = now.playing;
+    try {
+      win.setThumbarButtons([
+        { tooltip: 'Previous', icon: thumbIcon('prev'), click: () => send('prev') },
+        { tooltip: now.playing ? 'Pause' : 'Play', icon: thumbIcon(now.playing ? 'pause' : 'play'), click: () => send('toggle') },
+        { tooltip: 'Next', icon: thumbIcon('next'), click: () => send('next') }
+      ]);
+    } catch (e) { /* thumbnail toolbar unavailable */ }
+  };
+  win.on('show', () => setThumbar(true));
   ipcMain.on('bside:now-playing', (e, info) => {
     if (e.sender !== win.webContents || !info) return;
     now = { title: String(info.title || ''), artist: String(info.artist || ''), playing: !!info.playing };
+    if (win.isVisible()) setThumbar(false);
     if (!tray) return;
     tray.setToolTip((now.title ? now.title + (now.artist ? ' — ' + now.artist : '') : 'Groove').slice(0, 127));
     buildMenu();
@@ -454,6 +649,7 @@ function createWindow() {
   // Opened at sign-in with "tray only": stay hidden until the tray icon is clicked.
   win.once('ready-to-show', () => { if (!desktop.startHidden) win.show(); });
   win.showFromTray = desktop.showWindow;
+  setupAuth(win, desktop.showWindow);
 
   // Remember where each mode's window was left.
   const remember = () => {

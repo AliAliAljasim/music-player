@@ -1,18 +1,27 @@
 "use strict";
 // YouTube sign-in, library import and playback for Groove.
-// Google Identity Services issues a youtube.readonly token, the YouTube
-// Data API v3 supplies playlists, and the IFrame Player API plays them.
+// In the desktop app, the main process signs in and keeps the session (see
+// setupAuth in main.js); in a plain browser, Google Identity Services issues
+// an hour-long token. The YouTube Data API v3 supplies playlists, and the
+// IFrame Player API plays them.
 window.BSideYouTube = (() => {
-  const SCOPE = 'https://www.googleapis.com/auth/youtube.readonly';
+  const SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl';
   const API = 'https://www.googleapis.com/youtube/v3/';
   const TOKEN_KEY = 'bside.ytToken';
   const MUSIC_CATEGORY = '10';
   const clientId = ((window.BSIDE_CONFIG || {}).googleClientId || '').trim();
 
-  let token = null;
+  const shellAuth = window.bsideShell && window.bsideShell.auth;
+  const desktop = shellAuth ? shellAuth.info() : { configured: false };
+  const viaApp = desktop.configured;
+
+  let token = null; // { value, exp }
+  // Desktop: whether the main process holds a session it can renew.
+  let session = viaApp && desktop.saved;
   try {
     const t = JSON.parse(localStorage.getItem(TOKEN_KEY));
-    if (t && t.exp > Date.now() + 60000) token = t;
+    if (viaApp) localStorage.removeItem(TOKEN_KEY);
+    else if (t && t.exp > Date.now() + 60000) token = t;
   } catch (e) { /* storage unavailable: sign in each visit */ }
 
   function loadScript(src) {
@@ -27,17 +36,40 @@ window.BSideYouTube = (() => {
   }
 
   // Preload GIS so requestAccessToken runs inside the click (popup blockers).
-  if (clientId) loadScript('https://accounts.google.com/gsi/client').catch(() => {});
+  if (clientId && !viaApp) loadScript('https://accounts.google.com/gsi/client').catch(() => {});
 
   function saveToken(t) {
     token = t;
+    if (viaApp) return; // the main process keeps the session
     try {
       if (t) localStorage.setItem(TOKEN_KEY, JSON.stringify(t));
       else localStorage.removeItem(TOKEN_KEY);
     } catch (e) { /* ignore */ }
   }
 
-  function signIn() {
+  async function appCall(action) {
+    const r = await shellAuth.call(action);
+    if (r.error) throw new Error(r.error);
+    return r;
+  }
+
+  // The access token, asking the main process for a fresh one when it's
+  // (nearly) expired or YouTube turned it down (`renew`).
+  async function accessToken(renew) {
+    if (!viaApp || (!renew && token && token.exp > Date.now() + 60000)) return token && token.value;
+    if (!session) return null;
+    const { token: t } = await appCall(renew ? 'renew' : 'token');
+    token = t;
+    session = !!t;
+    return t && t.value;
+  }
+
+  async function signIn() {
+    if (viaApp) {
+      token = (await appCall('signin')).token;
+      session = true;
+      return;
+    }
     if (!clientId) return Promise.reject(new Error('Add your Google OAuth Client ID to config.js first.'));
     if (!(window.google && google.accounts && google.accounts.oauth2)) {
       return Promise.reject(new Error('Google sign-in is still loading. Try again in a moment.'));
@@ -58,22 +90,38 @@ window.BSideYouTube = (() => {
   }
 
   function signOut() {
-    if (token && window.google && google.accounts) google.accounts.oauth2.revoke(token.value, () => {});
+    if (viaApp) {
+      appCall('signout').catch(() => {});
+      token = null;
+      session = false;
+    } else if (token && window.google && google.accounts) google.accounts.oauth2.revoke(token.value, () => {});
     saveToken(null);
     stopAll();
   }
 
-  async function api(path, params) {
-    if (!token) throw new Error('Not signed in to YouTube.');
-    const r = await fetch(API + path + '?' + new URLSearchParams(params), {
-      headers: { Authorization: 'Bearer ' + token.value }
+  // GET, or POST when there's a body.
+  async function api(path, params, body) {
+    let value = await accessToken(false);
+    if (!value) throw new Error('Not signed in to YouTube.');
+    const send = (v) => fetch(API + path + '?' + new URLSearchParams(params), {
+      method: body ? 'POST' : 'GET',
+      headers: { Authorization: 'Bearer ' + v, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined
     });
+    let r = await send(value);
+    if (r.status === 401 && viaApp && (value = await accessToken(true))) r = await send(value);
     if (r.status === 401) {
       saveToken(null);
+      session = false;
       throw new Error('Your YouTube session expired. Connect again.');
     }
     const j = await r.json();
-    if (!r.ok) throw new Error((j.error && j.error.message) || 'YouTube API error ' + r.status);
+    if (!r.ok) {
+      const msg = (j.error && j.error.message) || 'YouTube API error ' + r.status;
+      // A session from before Groove could change playlists (read-only).
+      if (r.status === 403 && /insufficient.*scope/i.test(msg)) throw new Error('Connect YouTube Music again to let Groove change your playlists.');
+      throw new Error(msg);
+    }
     return j;
   }
 
@@ -156,7 +204,7 @@ window.BSideYouTube = (() => {
       const lm = await playlistTracks('LM', (v) => !isShort(v));
       if (lm.length) return lm;
     } catch (e) {
-      if (!token) throw e; // session expired, not just LM being unavailable
+      if (!signedIn()) throw e; // session expired, not just LM being unavailable
     }
     const liked = await allItems('videos', { ...VIDEO_PARTS, myRating: 'like' });
     return liked.filter(isMusic).map(trackFromVideo);
@@ -191,6 +239,18 @@ window.BSideYouTube = (() => {
     const byId = new Map((await videoDetails(ids)).filter((v) => !isShort(v)).map((v) => [v.id, v]));
     return ids.filter((i) => byId.has(i)).map((i) => trackFromVideo(byId.get(i)));
   }
+
+  // Each insert costs 50 of the daily quota units.
+  async function addToPlaylist(playlistId, videoId) {
+    await api('playlistItems', { part: 'snippet' }, { snippet: { playlistId, resourceId: { kind: 'youtube#video', videoId } } });
+  }
+
+  async function createPlaylist(title) {
+    const p = await api('playlists', { part: 'snippet,status' }, { snippet: { title }, status: { privacyStatus: 'private' } });
+    return { id: p.id, name: p.snippet.title };
+  }
+
+  function signedIn() { return viaApp ? session : !!token; }
 
   // ---------- playback ----------
   // The player is kept invisible (see .yt-card); YouTube's terms ask for it
@@ -355,9 +415,10 @@ window.BSideYouTube = (() => {
   }
 
   return {
-    configured: !!clientId,
-    signedIn: () => !!token,
-    signIn, signOut, profile, library, search, ensurePlayer,
+    configured: viaApp || !!clientId,
+    // Desktop sign-in finishes in the system browser rather than a popup.
+    signInInBrowser: viaApp,
+    signedIn, signIn, signOut, profile, library, search, addToPlaylist, createPlaylist, ensurePlayer,
     onEnded: (fn) => { onEnded = fn; },
     onError: (fn) => { onError = fn; },
     // Playing/paused as the player reports it, including changes made outside

@@ -20,6 +20,11 @@ contextBridge.exposeInMainWorld('bsideShell', {
     set: (level, muted) => ipcRenderer.send('bside:mixer-set', level, muted),
     onChange: (fn) => ipcRenderer.on('bside:mixer', (e, v) => fn(v))
   },
+  // Google sign-in runs in the main process (see setupAuth in main.js).
+  auth: {
+    info: () => ipcRenderer.sendSync('bside:auth-info'),
+    call: (action) => ipcRenderer.invoke('bside:auth', action)
+  },
   showStripMenu: (info) => ipcRenderer.send('bside:strip-menu', info),
   onSettingsChanged: (fn) => ipcRenderer.on('bside:settings-changed', (e, s) => fn(s)),
   updates: {

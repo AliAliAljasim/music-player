@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generates config.js from .env (the browser can't read .env directly).
+# Generates config.js (for the page) and oauth.json (for the desktop app's
+# main process) from .env, so neither the page nor git sees .env itself.
 set -euo pipefail
 cd "$(dirname "$0")"
 [ -f .env ] || { echo "No .env found — copy .env.example to .env first." >&2; exit 1; }
@@ -10,4 +11,6 @@ window.BSIDE_CONFIG = {
   googleClientId: '${GOOGLE_CLIENT_ID:-}'
 };
 JS
-echo "Wrote config.js"
+node -e 'process.stdout.write(JSON.stringify({ clientId: process.argv[1], clientSecret: process.argv[2] }) + "\n")' \
+  "${GOOGLE_DESKTOP_CLIENT_ID:-}" "${GOOGLE_DESKTOP_CLIENT_SECRET:-}" > oauth.json
+echo "Wrote config.js and oauth.json"

@@ -324,6 +324,20 @@ button {
 }
 .song-menu button { height: 34px; padding: 0 12px; border-radius: 6px; font-size: 13px; color: var(--fg); }
 .song-menu button:hover { background: rgba(255,255,255,.08); }
+.song-menu button { text-align: left; }
+.song-menu.picking { width: 240px; }
+.song-menu .menu-back { color: var(--muted); }
+.song-menu .menu-list { display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; border-block: 1px solid #34302B; margin: 2px 0; padding: 2px 0; }
+.song-menu .menu-list button { flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.song-menu .menu-new { color: var(--accent); }
+.song-menu .menu-form { display: flex; gap: 6px; padding: 4px 6px 6px; }
+.song-menu .menu-form input {
+  flex: 1; min-width: 0; height: 32px; padding: 0 10px; border-radius: 6px; font: inherit; font-size: 13px;
+  color: var(--fg); background: rgba(255,255,255,.06); border: 1px solid #34302B; outline: none;
+}
+.song-menu .menu-form input:focus { border-color: var(--accent); }
+.song-menu .menu-form button { background: var(--accent); color: #131211; font-weight: 600; text-align: center; }
+.song-menu .menu-form button:hover { background: var(--accent); filter: brightness(1.1); }
 .hidden { display: none !important; }
 
 /* ---------- CRATE ---------- */

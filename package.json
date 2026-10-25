@@ -21,6 +21,7 @@
       "app.js",
       "youtube.js",
       "config.js",
+      "oauth.json",
       "style.css",
       "package.json",
       "build/icon.ico",
